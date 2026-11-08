@@ -1,5 +1,8 @@
 import { window } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
+import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
+import { AICaptionComponent, AICaptionController, AICaptionOptions } from '@kit.SpeechKit';
+import { CaptionLog, CaptionRecord } from '../model/CaptionLog';
 import {
   Station, Scope, Palette, SCOPE_NAMES, VIZ_NAMES, THEME_NAMES, SLEEP_OPTIONS, themeColors
 } from '../model/Station';
@@ -37,6 +40,26 @@ struct Index {
   @State sleepLeft: number = 0;
   @State settingsOpen: boolean = false;
   @State clock: string = '';
+  @State captionOn: boolean = false;
+  @State captionLogOpen: boolean = false;
+  @State captionRecords: CaptionRecord[] = [];
+  @State captionInput: string = '';
+
+  private captionLog: CaptionLog = new CaptionLog();
+
+  /** 系统 AI 字幕能力：端侧识别，无需任何云端密钥。 */
+  private captionSupported: boolean = canIUse('SystemCapability.AI.AICaption');
+  private captionController: AICaptionController = new AICaptionController();
+  private captionOptions: AICaptionOptions = {
+    initialOpacity: 0.86,
+    onPrepared: (): void => {
+      this.statusText = '字幕已就绪';
+    },
+    onError: (err: BusinessError): void => {
+      this.captionOn = false;
+      this.statusText = '字幕不可用：' + err.code.toString();
+    }
+  };
 
   private store: RadioStore = RadioStore.getInstance();
   private player: RadioPlayer = new RadioPlayer();
@@ -50,7 +73,10 @@ struct Index {
   private sleepEnd: number = 0;
 
   aboutToAppear(): void {
-    this.store.init(this.getUIContext().getHostContext() as common.UIAbilityContext);
+    const ctx: common.UIAbilityContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    this.store.init(ctx);
+    this.captionLog.init(ctx);
+    this.captionRecords = this.captionLog.all();
     const cfg = this.store.config;
     this.current = this.store.findById(cfg.lastId);
     this.favorites = cfg.favorites.slice();
@@ -295,6 +321,39 @@ struct Index {
     return this.isWide() ? '33%' : '38%';
   }
 
+  // ============================== 字幕记录 ==============================
+
+  private openCaptionLog(): void {
+    this.settingsOpen = false;
+    this.captionRecords = this.captionLog.all();
+    this.captionLogOpen = true;
+  }
+
+  private saveCaption(): void {
+    this.captionRecords = this.captionLog.add(this.current.name, this.captionInput);
+    this.captionInput = '';
+  }
+
+  private clearCaptions(): void {
+    this.captionRecords = this.captionLog.clear();
+  }
+
+  private copyCaptions(): void {
+    const text: string = this.captionLog.exportText();
+    if (text.length === 0) {
+      this.statusText = '暂无记录';
+      return;
+    }
+    try {
+      const data: pasteboard.PasteData = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, text);
+      pasteboard.getSystemPasteboard().setData(data).then(() => {
+        this.statusText = '已复制 ' + this.captionRecords.length.toString() + ' 条';
+      });
+    } catch (e) {
+      this.statusText = '复制失败';
+    }
+  }
+
   // ============================== 页面骨架 ==============================
 
   build() {
@@ -361,6 +420,38 @@ struct Index {
         .height('100%')
         .backgroundColor(Palette.SURFACE)
         .border({ width: { left: 1 }, color: Palette.BORDER })
+      }
+
+      // 系统 AI 字幕：isShown=true 时自动识别本应用正在播放的音频（API 18+），无需传 PCM。
+      if (this.captionSupported && this.captionOn) {
+        Column() {
+          AICaptionComponent({
+            isShown: this.captionOn,
+            controller: this.captionController,
+            options: this.captionOptions
+          })
+        }
+        .width(this.isTablet() ? '40%' : '92%')
+        .height(150)
+        .position({ x: this.isTablet() ? '56%' : '4%', y: '66%' })
+      }
+
+      if (this.captionLogOpen) {
+        Column()
+          .width('100%')
+          .height('100%')
+          .backgroundColor('#A6000000')
+          .onClick(() => {
+            this.captionLogOpen = false;
+          })
+        Column() {
+          this.captionLogPane()
+        }
+        .width(this.isTablet() ? 460 : '92%')
+        .height('86%')
+        .backgroundColor(Palette.SURFACE)
+        .borderRadius(20)
+        .border({ width: 1, color: Palette.BORDER })
       }
     }
     .width('100%')
@@ -1112,6 +1203,110 @@ struct Index {
     })
   }
 
+  /** 字幕记录本：粘贴 / 输入字幕内容并落盘，支持查看、复制全部与清空。 */
+  @Builder
+  captionLogPane() {
+    Column() {
+      Row() {
+        Text('字幕记录')
+          .fontSize(20)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(Palette.TEXT)
+        Blank()
+        Text('关闭')
+          .fontSize(13)
+          .fontColor(Palette.BLUE)
+          .onClick(() => {
+            this.captionLogOpen = false;
+          })
+      }
+      .width('100%')
+      .padding({ left: 20, right: 20, top: 20, bottom: 14 })
+
+      TextInput({ placeholder: '粘贴或输入字幕内容', text: this.captionInput })
+        .fontSize(13)
+        .fontColor(Palette.TEXT)
+        .placeholderColor(Palette.TEXT_FAINT)
+        .backgroundColor(Palette.SURFACE_2)
+        .height(42)
+        .borderRadius(10)
+        .padding({ left: 12, right: 12 })
+        .width('100%')
+        .margin({ left: 20, right: 20 })
+        .onChange((value: string) => {
+          this.captionInput = value;
+        })
+
+      Row() {
+        Text('保存')
+          .fontSize(12)
+          .fontColor('#FFFFFF')
+          .padding({ left: 16, right: 16, top: 8, bottom: 8 })
+          .borderRadius(9)
+          .backgroundColor(Palette.BLUE)
+          .onClick(() => {
+            this.saveCaption();
+          })
+        Text('复制全部')
+          .fontSize(12)
+          .fontColor(Palette.TEXT_DIM)
+          .padding({ left: 14, right: 14, top: 8, bottom: 8 })
+          .borderRadius(9)
+          .backgroundColor(Palette.SURFACE_2)
+          .margin({ left: 8 })
+          .onClick(() => {
+            this.copyCaptions();
+          })
+        Blank()
+        Text('清空')
+          .fontSize(12)
+          .fontColor(Palette.TEXT_FAINT)
+          .onClick(() => {
+            this.clearCaptions();
+          })
+      }
+      .width('100%')
+      .margin({ top: 12, bottom: 12 })
+      .padding({ left: 20, right: 20 })
+
+      Scroll() {
+        Column() {
+          if (this.captionRecords.length === 0) {
+            Text('暂无记录')
+              .fontSize(12)
+              .fontColor(Palette.TEXT_FAINT)
+              .margin({ top: 40 })
+          }
+          ForEach(this.captionRecords.slice().reverse(), (rec: CaptionRecord) => {
+            Column() {
+              Text(rec.time + '  ' + rec.station)
+                .fontSize(10)
+                .fontColor(Palette.TEXT_FAINT)
+              Text(rec.text)
+                .fontSize(13)
+                .fontColor(Palette.TEXT)
+                .width('100%')
+                .margin({ top: 5 })
+            }
+            .width('100%')
+            .padding(12)
+            .borderRadius(10)
+            .backgroundColor(Palette.SURFACE_2)
+            .alignItems(HorizontalAlign.Start)
+            .margin({ bottom: 8 })
+          }, (rec: CaptionRecord) => rec.time + rec.text)
+        }
+        .width('100%')
+        .padding({ left: 20, right: 20, bottom: 20 })
+      }
+      .layoutWeight(1)
+      .scrollBar(BarState.Off)
+      .align(Alignment.Top)
+    }
+    .width('100%')
+    .height('100%')
+  }
+
   // ============================== 设置 ==============================
 
   @Builder
@@ -1138,6 +1333,24 @@ struct Index {
 
       Scroll() {
         Column() {
+          Row() {
+            Text('字幕记录')
+              .fontSize(13)
+              .fontColor(Palette.TEXT)
+            Blank()
+            Text(this.captionRecords.length.toString() + ' 条 ›')
+              .fontSize(12)
+              .fontColor(Palette.BLUE)
+          }
+          .width('100%')
+          .padding(14)
+          .borderRadius(12)
+          .backgroundColor(Palette.SURFACE_2)
+          .margin({ bottom: 18 })
+          .onClick(() => {
+            this.openCaptionLog();
+          })
+
           Flex({ wrap: FlexWrap.Wrap }) {
             ForEach(VIZ_NAMES, (name: string, index: number) => {
               Text(name)
@@ -1222,6 +1435,26 @@ struct Index {
           .borderRadius(12)
           .backgroundColor(Palette.SURFACE_2)
           .margin({ bottom: 18 })
+
+          if (this.captionSupported) {
+            Row() {
+              Text('实时字幕')
+                .fontSize(13)
+                .fontColor(Palette.TEXT)
+              Blank()
+              Toggle({ type: ToggleType.Switch, isOn: this.captionOn })
+                .selectedColor(Palette.BLUE)
+                .onChange((isOn: boolean) => {
+                  this.captionOn = isOn;
+                  this.statusText = isOn ? '正在开启字幕' : '字幕已关闭';
+                })
+            }
+            .width('100%')
+            .padding(14)
+            .borderRadius(12)
+            .backgroundColor(Palette.SURFACE_2)
+            .margin({ bottom: 18 })
+          }
 
           Row() {
             ForEach(SLEEP_OPTIONS, (minutes: number) => {
