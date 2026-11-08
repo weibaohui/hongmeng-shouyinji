@@ -1,0 +1,6 @@
+{
+  "name": "libspectrum.so",
+  "types": "./index.d.ts",
+  "version": "1.0.0",
+  "description": "从电台音频流解析实时频谱的原生模块"
+}

@@ -24,3 +24,6 @@ build-profile.local.json5
 
 # 预览页调试临时文件
 preview/_probe.html
+
+# 原生（CMake/NAPI）构建缓存
+entry/.cxx/

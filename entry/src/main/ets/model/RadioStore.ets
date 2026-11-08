@@ -9,6 +9,8 @@ export class RadioConfig {
   volume: number = 60;
   favorites: number[] = [];
   vizStyle: number = 0;
+  /** 频谱数据来源：0 模拟动画，1 真实音频分析。 */
+  vizMode: number = 0;
   colorTheme: number = 0;
   random: boolean = false;
   soundPreset: number = 0;
@@ -54,6 +56,7 @@ export class RadioStore {
       c.volume = p.getSync('volume', 60) as number;
       c.favorites = this.parseIds(p.getSync('favorites', '') as string);
       c.vizStyle = p.getSync('vizStyle', 0) as number;
+      c.vizMode = p.getSync('vizMode', 0) as number;
       c.colorTheme = p.getSync('colorTheme', 0) as number;
       this.migrateViz(p, c);
       c.random = p.getSync('random', false) as boolean;
@@ -103,6 +106,7 @@ export class RadioStore {
       p.putSync('volume', c.volume);
       p.putSync('favorites', c.favorites.join(','));
       p.putSync('vizStyle', c.vizStyle);
+      p.putSync('vizMode', c.vizMode);
       p.putSync('colorTheme', c.colorTheme);
       p.putSync('random', c.random);
       p.putSync('soundPreset', c.soundPreset);
@@ -114,7 +118,9 @@ export class RadioStore {
       p.putSync('scope', c.scope);
       p.putSync('province', c.province);
       p.putSync('genre', c.genre);
-      p.flushSync();
+      // 异步落盘：切台等高频操作不阻塞 UI 线程（同步 flush 会卡住点击响应）
+      p.flush().catch(() => {
+      });
     } catch (e) {
       // 持久化失败不阻断收听
     }

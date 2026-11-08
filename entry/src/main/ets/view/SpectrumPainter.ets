@@ -25,6 +25,12 @@ export class SpectrumPainter {
   private dbmPeakL: number = 0;
   private dbmPeakR: number = 0;
   private themeIdx: number = -1;
+  /** 当前频谱样式：由页面在切换时显式写入，绘制时不再依赖每帧传入的状态快照。 */
+  private styleIdx: number = 0;
+  /** 是否使用真实音频分析结果；false 时走原本的模拟动画。 */
+  private realMode: boolean = false;
+  /** 最近一帧真实频段能量（16 个，0~1）。 */
+  private realBands: number[] = [];
   private baseHue: number = 0;
   private lut: string[] = [];
   private lutRgb: number[][] = [];
@@ -40,6 +46,32 @@ export class SpectrumPainter {
   /** 切换配色；随机主题时重掷基准色相（对齐 E6 setColorTheme）。 */
   setTheme(theme: number): void {
     this.buildLut(theme);
+  }
+
+  /** 切换频谱样式：立即生效，下一帧即按新样式绘制。 */
+  setStyle(style: number): void {
+    this.styleIdx = style;
+  }
+
+  style(): number {
+    return this.styleIdx;
+  }
+
+  /** 切换数据来源：模拟动画 / 真实音频分析。 */
+  setRealMode(on: boolean): void {
+    this.realMode = on;
+    if (!on) {
+      this.realBands = [];
+    }
+  }
+
+  isRealMode(): boolean {
+    return this.realMode;
+  }
+
+  /** 写入真实频段能量；长度不足时缺失的频段按静音处理。 */
+  setRealBands(bands: number[]): void {
+    this.realBands = bands;
   }
 
   /** 换台时随机主题重掷色相（对齐 E6 playStationObj）。 */
@@ -70,24 +102,57 @@ export class SpectrumPainter {
     const t: number = now / 140;
     const beat: number = Math.sin(t * 1.8) > 0.6 ? 0.24 : 0;
     const next: number[] = [];
+    const real: boolean = this.realMode;
+    const hasReal: boolean = real && this.realBands.length >= BAR_COUNT;
     for (let i = 0; i < BAR_COUNT; i++) {
       let target: number = 0.04;
+      let attack: number = 0.65;
+      let release: number = 0.40;
       if (active) {
-        const w1: number = Math.sin(t * 0.85 + i * 0.42);
-        const w2: number = Math.cos(t * 1.25 - i * 0.35);
-        const flutter: number = Math.sin(now / 70 + i * 1.7) * 0.09;
-        target = Math.max(0.06, Math.min(0.92, w1 * 0.28 + w2 * 0.22 + 0.40 + beat + flutter));
+        if (real) {
+          // 真实模式直接映射分析出的频段能量；起落比模拟更快，才能跟上声音
+          target = hasReal ? Math.max(0.02, Math.min(1, this.realBands[i])) : 0.04;
+          attack = 0.62;
+          release = 0.26;
+        } else {
+          const w1: number = Math.sin(t * 0.85 + i * 0.42);
+          const w2: number = Math.cos(t * 1.25 - i * 0.35);
+          const flutter: number = Math.sin(now / 70 + i * 1.7) * 0.09;
+          target = Math.max(0.06, Math.min(0.92, w1 * 0.28 + w2 * 0.22 + 0.40 + beat + flutter));
+        }
       }
       const cur: number = this.spec[i];
-      const factor: number = target > cur ? 0.65 : 0.40;
+      const factor: number = target > cur ? attack : release;
       next.push(cur * (1 - factor) + target * factor);
     }
     this.spec = next;
 
-    // 分贝电平表：模拟模式公式（E6 startWaveLoop 的 sim 分支）
+    // 分贝电平表：真实模式取频段均值，模拟模式沿用 E6 startWaveLoop 的 sim 分支
     if (active) {
-      const simL: number = Math.max(0.08, Math.min(0.96, 0.46 + Math.sin(t * 0.9) * 0.32 + beat));
-      const simR: number = Math.max(0.08, Math.min(0.96, 0.44 + Math.cos(t * 1.1) * 0.32 + beat));
+      let simL: number = 0;
+      let simR: number = 0;
+      if (real) {
+        let sum: number = 0;
+        let low: number = 0;
+        let high: number = 0;
+        const n: number = this.realBands.length;
+        if (n > 0) {
+          for (let i = 0; i < n; i++) {
+            const v: number = Math.max(0, Math.min(1, this.realBands[i]));
+            sum += v;
+            if (i < n / 3) {
+              low += v;
+            } else if (i >= n * 2 / 3) {
+              high += v;
+            }
+          }
+          simL = Math.max(0.05, Math.min(1, sum / n * 1.35));
+          simR = Math.max(0.05, Math.min(1, (low * 0.6 + high * 0.9) / Math.max(1, n / 3) * 0.85));
+        }
+      } else {
+        simL = Math.max(0.08, Math.min(0.96, 0.46 + Math.sin(t * 0.9) * 0.32 + beat));
+        simR = Math.max(0.08, Math.min(0.96, 0.44 + Math.cos(t * 1.1) * 0.32 + beat));
+      }
       this.dbmValL = simL;
       this.dbmValR = simR;
       this.dbmPeakL = Math.max(simL, this.dbmPeakL * 0.93);
@@ -105,15 +170,12 @@ export class SpectrumPainter {
     }
   }
 
-  draw(ctx: CanvasRenderingContext2D, width: number, height: number, style: number,
-       theme: number, active: boolean): void {
+  draw(ctx: CanvasRenderingContext2D, width: number, height: number, active: boolean): void {
     if (width <= 0 || height <= 0) {
       return;
     }
+    const style: number = this.styleIdx;
     ctx.clearRect(0, 0, width, height);
-    if (theme !== this.themeIdx) {
-      this.buildLut(theme);
-    }
     let designH: number = 112;
     if (style === 2) {
       designH = 108;
