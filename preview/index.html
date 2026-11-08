@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>收音机 · 鸿蒙平板版界面预览</title>
+<style>
+  :root {
+    --bg:#0B1017; --surface:#111925; --surface2:#172231; --card:#1B2839;
+    --border:#26354A; --text:#E8EFF8; --dim:#8FA2B8; --faint:#5B6B80;
+    --blue:#4C9AFF; --green:#3DDC84; --gold:#F5C24B; --red:#F2637B;
+  }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; overflow:hidden; }
+  body { background:var(--bg); color:var(--text); font-family:"HarmonyOS Sans","PingFang SC","Microsoft YaHei",system-ui,sans-serif; font-size:14px; }
+  button { font-family:inherit; cursor:pointer; border:none; background:none; color:inherit; }
+  ::-webkit-scrollbar { width:6px; height:6px; }
+  ::-webkit-scrollbar-thumb { background:#2B3B50; border-radius:6px; }
+  ::-webkit-scrollbar-track { background:transparent; }
+
+  .app { display:grid; grid-template-columns:218px minmax(320px,33%) 1fr; height:100vh; }
+  /* 左侧导航 */
+  .nav { background:var(--surface); border-right:1px solid var(--border); display:flex; flex-direction:column; padding:0 10px; }
+  .brand { display:flex; align-items:center; gap:10px; padding:22px 8px; }
+  .brand img { width:38px; height:38px; border-radius:10px; }
+  .brand b { font-size:17px; display:block; }
+  .brand span { font-size:10px; color:var(--faint); }
+  .nav-label { font-size:11px; color:var(--faint); margin:0 10px 8px; }
+  .nav-item { display:flex; align-items:center; gap:10px; height:46px; padding:0 14px; border-radius:12px; color:var(--dim); margin-bottom:4px; }
+  .nav-item .ico { width:24px; text-align:center; font-size:17px; }
+  .nav-item.active { background:#182C44; color:var(--text); }
+  .nav-item.active .ico, .nav-item.active .count { color:var(--blue); }
+  .nav-item .count { margin-left:auto; font-size:11px; color:var(--faint); }
+  .nav hr { border:0; border-top:1px solid var(--border); width:70%; margin:16px auto; }
+  .nav .spacer { flex:1; }
+  .stat { background:var(--surface2); border-radius:14px; padding:14px; margin:0 2px 18px; }
+  .stat b { font-size:24px; color:var(--blue); display:block; }
+  .stat span { font-size:11px; color:var(--dim); display:block; margin-top:2px; }
+  .stat small { font-size:10px; color:var(--faint); display:block; margin-top:8px; }
+
+  /* 中间列表 */
+  .list { display:flex; flex-direction:column; border-right:1px solid var(--border); min-width:0; }
+  .list-head { padding:20px 20px 14px; display:flex; align-items:flex-start; }
+  .list-head h1 { font-size:24px; margin:0; }
+  .list-head p { font-size:11px; color:var(--faint); margin:3px 0 0; }
+  .clock { margin-left:auto; font-size:13px; color:var(--dim); font-variant-numeric:tabular-nums; }
+  .search { display:flex; align-items:center; height:44px; margin:0 16px 12px; border-radius:12px; background:var(--surface2); padding:0 12px; }
+  .search span { font-size:18px; color:var(--faint); }
+  .search input { flex:1; min-width:0; background:none; border:none; outline:none; color:var(--text); font-size:13px; padding:0 8px; }
+  .search input::placeholder { color:var(--faint); }
+  .search button { color:var(--dim); font-size:20px; }
+  .tabs { display:flex; gap:6px; padding:0 16px 10px; flex-wrap:wrap; }
+  .tab { font-size:12px; color:var(--dim); padding:7px 12px; border-radius:16px; white-space:nowrap; }
+  .tab.active { background:var(--blue); color:#fff; }
+  .filter-title { font-size:11px; color:var(--faint); margin:0 20px 6px; }
+  .chips { display:flex; gap:6px; overflow-x:auto; padding:0 16px 10px; scrollbar-width:none; }
+  .chips::-webkit-scrollbar { display:none; }
+  .chip { font-size:12px; color:var(--dim); background:var(--surface2); border-radius:16px; padding:7px 12px; white-space:nowrap; flex:none; }
+  .chip.active { color:#fff; background:var(--blue); font-weight:600; }
+  .list-meta { display:flex; padding:0 20px 8px; font-size:12px; color:var(--dim); }
+  .list-meta span:last-child { margin-left:auto; font-size:11px; color:var(--faint); }
+  .rows { flex:1; overflow-y:auto; padding:0 12px 10px; }
+  .row { display:flex; align-items:center; height:60px; padding:0 10px; border-radius:12px; background:var(--surface); margin-bottom:4px; cursor:pointer; }
+  .row:hover { background:#162335; }
+  .row.current { background:#182C44; }
+  .row .no { width:30px; text-align:center; font-size:11px; color:var(--faint); flex:none; }
+  .row .info { flex:1; min-width:0; }
+  .row .name { font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .row.current .name { color:var(--blue); }
+  .row .sub { font-size:10px; color:var(--dim); margin-top:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .row .playing { color:var(--green); font-size:11px; margin-right:6px; }
+  .row .star { width:30px; text-align:center; font-size:17px; color:var(--faint); flex:none; }
+  .row .star.on { color:var(--gold); }
+  .empty { text-align:center; color:var(--dim); padding:60px 20px; }
+  .empty div { font-size:40px; color:var(--border); }
+
+  /* 右侧播放器 */
+  .player { overflow-y:auto; padding:0 26px 22px; }
+  .player-top { display:flex; align-items:center; padding:20px 0 16px; }
+  .player-top .t { font-size:12px; color:var(--dim); }
+  .player-top .s { font-size:11px; color:var(--faint); margin-top:2px; }
+  .badge { margin-left:auto; display:flex; align-items:center; gap:6px; font-size:12px; color:var(--dim); background:var(--surface2); padding:7px 12px; border-radius:16px; }
+  .badge i { width:6px; height:6px; border-radius:50%; background:var(--dim); }
+  .badge.playing { color:var(--green); } .badge.playing i { background:var(--green); }
+  .badge.loading { color:var(--blue); } .badge.loading i { background:var(--blue); }
+  .badge.error { color:var(--red); } .badge.error i { background:var(--red); }
+  .gear { font-size:19px; color:var(--dim); padding:0 8px; }
+  .card { background:var(--surface); border:1px solid var(--border); border-radius:22px; padding:22px; }
+  .card-top { display:flex; align-items:center; gap:8px; font-size:11px; color:var(--dim); }
+  .live { font-size:10px; font-weight:700; color:#0B1017; background:var(--green); padding:3px 8px; border-radius:5px; }
+  .live.off { background:var(--surface2); color:var(--dim); }
+  .star-lg { margin-left:auto; font-size:22px; color:var(--faint); cursor:pointer; }
+  .star-lg.on { color:var(--gold); }
+  .station-name { font-size:30px; font-weight:700; line-height:1.3; margin:18px 0 4px; }
+  .station-sub { font-size:11px; color:var(--faint); margin-bottom:14px; }
+  canvas { width:100%; height:150px; background:#0E1723; border-radius:12px; display:block; }
+  .viz-meta { display:flex; font-size:10px; color:var(--faint); margin:8px 0 12px; }
+  .viz-meta span:last-child { margin-left:auto; }
+  .controls { display:flex; align-items:center; justify-content:center; margin-bottom:16px; }
+  .ctrl { width:46px; height:46px; border-radius:50%; background:var(--card); color:var(--text); font-size:19px; display:flex; align-items:center; justify-content:center; }
+  .play { width:72px; height:72px; border-radius:50%; background:var(--blue); color:#0B1017; font-size:26px; margin:0 16px; display:flex; align-items:center; justify-content:center; }
+  .play.on { background:var(--green); }
+  .quick { display:flex; gap:10px; margin-bottom:18px; }
+  .quick button { font-size:11px; color:var(--dim); background:var(--surface2); border-radius:14px; padding:6px 12px; }
+  .quick button.on { color:var(--gold); background:#3A2E12; }
+  .quick .retry { margin-left:auto; }
+  .volume { display:flex; align-items:center; gap:10px; font-size:12px; color:var(--dim); }
+  .volume input { flex:1; accent-color:var(--blue); }
+  .volume b { width:30px; text-align:right; color:var(--text); font-variant-numeric:tabular-nums; }
+  .neighbors { display:flex; gap:12px; margin-top:14px; }
+  .neighbor { flex:1; background:var(--surface); border-radius:12px; padding:12px; cursor:pointer; min-width:0; }
+  .neighbor small { font-size:10px; color:var(--faint); }
+  .neighbor small em { color:var(--blue); font-style:normal; margin-right:5px; }
+  .neighbor div { font-size:12px; color:var(--dim); margin-top:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .tips { margin-top:14px; margin-bottom:22px; background:var(--surface); border-radius:12px; padding:14px 16px; }
+  .tips b { font-size:12px; color:var(--text); }
+  .tips p { margin:6px 0 0; font-size:11px; color:var(--faint); line-height:1.6; }
+  .tips span { color:var(--dim); }
+
+  /* 设置抽屉 */
+  .mask { position:fixed; inset:0; background:rgba(0,0,0,.65); z-index:8; }
+  .sheet { position:fixed; top:0; right:0; bottom:0; width:370px; max-width:92vw; background:var(--surface); border-left:1px solid var(--border); z-index:9; display:flex; flex-direction:column; }
+  .sheet-head { display:flex; align-items:center; padding:22px; }
+  .sheet-head b { font-size:20px; }
+  .sheet-head button { margin-left:auto; color:var(--blue); font-size:13px; }
+  .sheet-body { overflow-y:auto; padding:0 22px 24px; }
+  .sec { font-size:11px; color:var(--faint); margin:0 0 10px; }
+  .opt-row { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:18px; }
+  .opt { font-size:11px; color:var(--dim); background:var(--surface2); border-radius:9px; padding:8px 11px; }
+  .opt.active { background:var(--blue); color:#fff; }
+  .opt.theme { display:flex; align-items:center; gap:7px; border:1px solid transparent; }
+  .opt.theme.active { background:#1B3350; border-color:var(--blue); color:var(--text); }
+  .swatches { display:flex; }
+  .swatches i { width:6px; height:12px; display:block; }
+  .switch-row { display:flex; align-items:center; background:var(--surface2); border-radius:12px; padding:14px; margin-bottom:18px; font-size:13px; }
+  .toggle { margin-left:auto; width:40px; height:22px; border-radius:11px; background:#3A485C; position:relative; transition:.2s; }
+  .toggle i { position:absolute; top:3px; left:3px; width:16px; height:16px; border-radius:50%; background:#fff; transition:.2s; }
+  .toggle.on { background:var(--blue); } .toggle.on i { left:21px; }
+  .about { background:var(--surface2); border-radius:12px; padding:14px; font-size:11px; color:var(--dim); line-height:1.7; }
+  .about b { color:var(--text); font-size:12px; }
+  .about p { margin:4px 0 0; color:var(--faint); }
+
+  /* 说明性文案一律不显示：只保留控件文字与动态数据 */
+  .brand span, .nav-label, .stat, .list-head p, .filter-title,
+  .list-meta span:last-child, .player-top .t, .player-top .s,
+  .station-sub, .viz-meta, .tips, .sec, .about,
+  .empty small { display:none !important; }
+
+  .mobile-tabs { display:none; }
+  @media (max-width:1000px) {
+    .app { grid-template-columns:76px minmax(280px,38%) 1fr; }
+    .nav { padding:0 8px; }
+    .brand { justify-content:center; padding:22px 0; }
+    .brand > div, .nav-label, .stat, .nav-item .label, .nav-item .count, .nav-action .label { display:none; }
+    .nav-item, .nav-action { justify-content:center; padding:0; }
+    .player { padding:0 18px 20px; }
+    .station-name { font-size:25px; }
+  }
+  @media (max-width:680px) {
+    .app { display:block; height:calc(100vh - 64px); }
+    .nav { display:none; }
+    .list, .player { height:100%; border:0; }
+    /* 竖屏播放页：整屏垂直布局，内容自顶部排布，频谱占满剩余高度 */
+    .player { display:flex; flex-direction:column; overflow:hidden; padding:8px 18px 18px; }
+    .player-top { flex:none; padding:8px 0 18px; }
+    .card { flex:1; min-height:0; display:flex; flex-direction:column; background:none; border:0; border-radius:0; padding:0; }
+    .card-top, .station-name, .controls, .quick, .volume, .neighbors { flex:none; }
+    .station-name { font-size:30px; margin:16px 0; }
+    canvas { flex:1 1 0; min-height:160px; height:0; width:100%; border-radius:18px; }
+    .controls { margin:20px 0 18px; }
+    .neighbors { margin-top:16px; }
+    .volume > span { display:none; }
+    .hidden-pane { display:none; }
+    .mobile-tabs { display:flex; position:fixed; bottom:0; left:0; right:0; height:64px; background:var(--surface); border-top:1px solid var(--border); z-index:5; }
+    .mobile-tabs button { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; font-size:10px; color:var(--dim); }
+    .mobile-tabs button.active { color:var(--blue); }
+    .mobile-tabs .ico { font-size:17px; }
+    .sheet { width:100%; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="nav" id="nav">
+    <div class="brand">
+      <img src="./app_icon.png" alt="">
+      <div><b>收音机</b><span>平板版 · 网络电台</span></div>
+    </div>
+    <div class="nav-label">频道</div>
+    <div id="navItems"></div>
+    <hr>
+    <div class="nav-item nav-action" onclick="openSettings()"><span class="ico">⚙</span><span class="label">收听设置</span></div>
+    <div class="spacer"></div>
+    <div class="stat"><b id="totalCount">0</b><span>个在线电台</span><small>数据来自 E6 收音机</small></div>
+  </aside>
+
+  <section class="list" id="listPane">
+    <div class="list-head">
+      <div><h1>电台</h1><p>按地区、题材发现好声音</p></div>
+      <div class="clock" id="clock"></div>
+    </div>
+    <div class="search">
+      <span>⌕</span>
+      <input id="search" placeholder="搜索电台、城市或题材" oninput="onSearch(this.value)">
+      <button onclick="clearSearch()">×</button>
+    </div>
+    <div class="tabs" id="tabs"></div>
+    <div class="filter-title">省市</div>
+    <div class="chips" id="provinces"></div>
+    <div class="filter-title">题材</div>
+    <div class="chips" id="genres"></div>
+    <div class="list-meta"><span id="resultCount"></span><span id="modeHint">顺序切台</span></div>
+    <div class="rows" id="rows" onscroll="onRowsScroll(this)"></div>
+  </section>
+
+  <section class="player" id="playerPane">
+    <div class="player-top">
+      <div><div class="t">正在收听</div><div class="s" id="liveKind">国内直播</div></div>
+      <div class="badge" id="badge"><i></i><span id="status">准备就绪</span></div>
+      <button class="gear" onclick="openSettings()">⚙</button>
+    </div>
+    <div class="card">
+      <div class="card-top">
+        <span class="live off" id="liveTag">LIVE</span>
+        <span id="tagProvince"></span><span>·</span><span id="tagGenre"></span>
+        <span class="star-lg" id="bigStar" onclick="toggleFav(current.id)">☆</span>
+      </div>
+      <div class="station-name" id="stationName"></div>
+      <div class="station-sub" id="stationSub"></div>
+      <canvas id="spectrum"></canvas>
+      <div class="viz-meta"><span id="vizName"></span><span id="themeName"></span></div>
+      <div class="controls">
+        <button class="ctrl" onclick="cut(-1)">◀</button>
+        <button class="play" id="playBtn" onclick="togglePlay()">▶</button>
+        <button class="ctrl" onclick="cut(1)">▶</button>
+      </div>
+      <div class="quick">
+        <button id="randomBtn" onclick="toggleRandom()">随机</button>
+        <button id="sleepBtn" onclick="openSettings()">定时关闭</button>
+        <button class="retry" onclick="playStation(current)">重试</button>
+      </div>
+      <div class="volume">
+        <span>音量</span>
+        <input type="range" min="0" max="100" id="volume" oninput="setVolume(this.value)">
+        <b id="volumeValue">60</b>
+      </div>
+    </div>
+    <div class="neighbors">
+      <div class="neighbor" onclick="cut(-1)"><small><em>◀</em>上一台</small><div id="prevName"></div></div>
+      <div class="neighbor" onclick="cut(1)"><small><em>▶</em>下一台</small><div id="nextName"></div></div>
+    </div>
+    <div class="tips">
+      <b>收听提示</b>
+      <p>点击左侧列表选台，或使用 ◀ ▶ 顺序 / 随机切台</p>
+      <p>当前流：<span id="streamHost"></span> · 数据源：E6 收音机 · 共 <span id="tipsTotal"></span> 台</p>
+    </div>
+  </section>
+</div>
+
+<div class="mobile-tabs" id="mobileTabs"></div>
+<div id="sheetHost"></div>
+
+<script src="./stations.js"></script>
+<script>
+const STATIONS = window.RADIO_STATIONS || [];
+const SCOPES = ['全部电台','我的收藏','国内电台','国际电台'];
+const SCOPE_ICONS = ['▦','★','◉','✦'];
+const VIZ_NAMES = ['频谱柱','LED 点阵','声波','电平表'];
+const THEME_NAMES = ['彩虹','灰白','赛博','琥珀'];
+const THEMES = [
+  ['#3B5BDB','#7048E8','#C7409B','#F03E63','#F59F00','#37B24D'],
+  ['#4A5B70','#6B7F97','#93A6BC','#B6C6D8','#D6E2EF','#FFFFFF'],
+  ['#164E63','#0E7490','#0891B2','#22D3EE','#67E8F9','#A5F3FC'],
+  ['#7C3A10','#B45309','#D97706','#F59E0B','#FBBF24','#FDE68A']
+];
+const SLEEP_OPTIONS = [0,15,30,60,90];
+
+const state = {
+  scope: 0, keyword:'', province:'全部', genre:'全部',
+  visible:[], shown:50, current:STATIONS[0], playing:false, loading:false,
+  favorites: JSON.parse(localStorage.getItem('radio_favs') || '[]'),
+  volume: Number(localStorage.getItem('radio_volume') || 60),
+  viz: Number(localStorage.getItem('radio_viz') || 0),
+  theme: Number(localStorage.getItem('radio_theme') || 0),
+  random: localStorage.getItem('radio_random') === '1',
+  sleepLeft:0, pane:0
+};
+const audio = new Audio();
+audio.preload = 'none';
+let levels = new Array(44).fill(0.12), phase = 0;
+const canvas = document.getElementById('spectrum');
+const ctx = canvas.getContext('2d');
+
+function uniqueSorted(key, filterFn) {
+  const counts = {};
+  STATIONS.forEach(s => { if (!filterFn || filterFn(s)) counts[s[key]] = (counts[s[key]]||0)+1; });
+  return ['全部'].concat(Object.keys(counts).sort((a,b)=>counts[b]-counts[a]));
+}
+const PROVINCES = uniqueSorted('province', s => s.countryCode === 'CN');
+const GENRES = uniqueSorted('genre');
+
+function save() {
+  localStorage.setItem('radio_favs', JSON.stringify(state.favorites));
+  localStorage.setItem('radio_volume', state.volume);
+  localStorage.setItem('radio_viz', state.viz);
+  localStorage.setItem('radio_theme', state.theme);
+  localStorage.setItem('radio_random', state.random ? '1' : '0');
+}
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function setStatus(text, kind) {
+  document.getElementById('status').textContent = text;
+  document.getElementById('badge').className = 'badge' + (kind ? ' ' + kind : '');
+}
+function isFav(id) { return state.favorites.indexOf(id) >= 0; }
+
+function renderNav() {
+  document.getElementById('navItems').innerHTML = SCOPES.map((name,i)=>
+    `<div class="nav-item ${state.scope===i?'active':''}" onclick="setScope(${i})">
+      <span class="ico">${SCOPE_ICONS[i]}</span><span class="label">${name}</span>
+      ${i===1?`<span class="count">${state.favorites.length}</span>`:''}</div>`).join('');
+  document.getElementById('tabs').innerHTML = SCOPES.map((name,i)=>
+    `<button class="tab ${state.scope===i?'active':''}" onclick="setScope(${i})">${name}</button>`).join('');
+  document.getElementById('provinces').innerHTML = PROVINCES.map(p=>
+    `<button class="chip ${state.province===p?'active':''}" onclick="setProvince('${escapeHtml(p)}')">${escapeHtml(p)}</button>`).join('');
+  document.getElementById('genres').innerHTML = GENRES.map(g=>
+    `<button class="chip ${state.genre===g?'active':''}" onclick="setGenre('${escapeHtml(g)}')">${escapeHtml(g)}</button>`).join('');
+  document.getElementById('totalCount').textContent = STATIONS.length;
+  document.getElementById('resultCount').textContent = '共 ' + state.visible.length + ' 台';
+  document.getElementById('modeHint').textContent = state.random ? '随机切台已开启' : '顺序切台';
+  document.getElementById('randomBtn').className = state.random ? 'on' : '';
+}
+function renderRows() {
+  const box = document.getElementById('rows');
+  if (!state.visible.length) {
+    box.innerHTML = `<div class="empty"><div>◌</div>${state.scope===1?'还没有收藏的电台':'没有找到匹配的电台'}<br><small>试试切换筛选条件或搜索其他关键词</small></div>`;
+    return;
+  }
+  const slice = state.visible.slice(0, state.shown);
+  box.innerHTML = slice.map((s,i)=>`
+    <div class="row ${state.current.id===s.id?'current':''}" onclick="playStationById(${s.id})">
+      <div class="no">${i+1}</div>
+      <div class="info">
+        <div class="name">${escapeHtml(s.name)}</div>
+        <div class="sub">${escapeHtml(s.countryCode==='CN'?s.province:s.country)} · ${escapeHtml(s.genre)}</div>
+      </div>
+      ${state.current.id===s.id && state.playing?'<div class="playing">▶</div>':''}
+      <div class="star ${isFav(s.id)?'on':''}" onclick="event.stopPropagation();toggleFav(${s.id})">${isFav(s.id)?'★':'☆'}</div>
+    </div>`).join('');
+}
+function onRowsScroll(el) {
+  if (el.scrollTop + el.clientHeight >= el.scrollHeight - 60 && state.shown < state.visible.length) {
+    state.shown = Math.min(state.visible.length, state.shown + 50);
+    renderRows();
+  }
+}
+function applyFilter() {
+  const kw = state.keyword.trim().toLowerCase();
+  state.visible = STATIONS.filter(s=>{
+    if (state.scope===1 && !isFav(s.id)) return false;
+    if (state.scope===2 && s.countryCode!=='CN') return false;
+    if (state.scope===3 && s.countryCode==='CN') return false;
+    if (state.province!=='全部' && s.province!==state.province) return false;
+    if (state.genre!=='全部' && s.genre!==state.genre) return false;
+    if (kw && !(s.name+s.city+s.province+s.genre+s.country).toLowerCase().includes(kw)) return false;
+    return true;
+  });
+  state.shown = 50;
+  renderNav(); renderRows(); renderPlayer();
+}
+function setScope(i) { state.scope=i; applyFilter(); }
+function setProvince(p) { state.province=p; state.scope=0; applyFilter(); }
+function setGenre(g) { state.genre=g; applyFilter(); }
+function onSearch(v) { state.keyword=v; applyFilter(); }
+function clearSearch() { state.keyword=''; document.getElementById('search').value=''; applyFilter(); }
+function toggleFav(id) {
+  const i = state.favorites.indexOf(id);
+  if (i>=0) state.favorites.splice(i,1); else state.favorites.push(id);
+  save(); applyFilter();
+}
+function findById(id) { return STATIONS.find(s=>s.id===id) || STATIONS[0]; }
+function queue() { return state.visible.length ? state.visible : STATIONS; }
+function neighbor(delta) {
+  const q = queue(), i = q.findIndex(s=>s.id===state.current.id);
+  return q.length ? q[((i<0?0:i)+delta+q.length)%q.length] : state.current;
+}
+function renderPlayer() {
+  const s = state.current;
+  document.getElementById('stationName').textContent = s.name;
+  document.getElementById('stationSub').textContent = '网络流 · ' + s.city;
+  document.getElementById('tagProvince').textContent = s.countryCode==='CN'?s.province:s.country;
+  document.getElementById('tagGenre').textContent = s.genre;
+  document.getElementById('liveKind').textContent = s.countryCode==='CN'?'国内直播':'国际直播';
+  document.getElementById('bigStar').textContent = isFav(s.id)?'★':'☆';
+  document.getElementById('bigStar').className = 'star-lg' + (isFav(s.id)?' on':'');
+  document.getElementById('prevName').textContent = neighbor(-1).name;
+  document.getElementById('nextName').textContent = neighbor(1).name;
+  document.getElementById('streamHost').textContent = s.url.split('/')[2] || '';
+  document.getElementById('tipsTotal').textContent = STATIONS.length;
+  document.getElementById('vizName').textContent = VIZ_NAMES[state.viz];
+  document.getElementById('themeName').textContent = THEME_NAMES[state.theme] + ' 配色';
+  document.getElementById('playBtn').textContent = state.playing?'❚❚':'▶';
+  document.getElementById('playBtn').className = 'play' + (state.playing?' on':'');
+  document.getElementById('liveTag').className = 'live' + (state.playing?'':' off');
+  document.getElementById('volume').value = state.volume;
+  document.getElementById('volumeValue').textContent = state.volume;
+  document.getElementById('sleepBtn').textContent = state.sleepLeft>0 ? formatSleep() : '定时关闭';
+}
+function playStation(s) {
+  localStorage.setItem('radio_last', s.id);
+  state.current = s; state.playing = false; state.loading = true;
+  setStatus('正在连接电台…','loading');
+  renderRows(); renderPlayer();
+  audio.pause();
+  audio.src = s.url;
+  audio.volume = state.volume/100;
+  const p = audio.play();
+  if (p) p.then(()=>{
+    state.playing = true; state.loading = false;
+    setStatus('正在播放','playing'); renderRows(); renderPlayer();
+  }).catch(()=>{
+    state.playing = false; state.loading = false;
+    setStatus('预览环境无法拉流（真机可收听）','error'); renderPlayer();
+  });
+}
+function playStationById(id) { playStation(findById(id)); }
+function togglePlay() {
+  if (state.playing) {
+    audio.pause(); state.playing=false; setStatus('已暂停'); renderRows(); renderPlayer();
+  } else if (audio.src) {
+    const p = audio.play();
+    if (p) p.then(()=>{ state.playing=true; setStatus('正在播放','playing'); renderRows(); renderPlayer(); })
+            .catch(()=>{ setStatus('播放失败，请换台','error'); });
+  } else { playStation(state.current); }
+}
+function cut(delta) {
+  const q = queue();
+  const i = q.findIndex(s=>s.id===state.current.id);
+  const next = state.random ? Math.floor(Math.random()*q.length) : ((i<0?0:i)+delta+q.length)%q.length;
+  playStation(q[next]);
+}
+function toggleRandom() { state.random=!state.random; save(); renderNav(); }
+function setVolume(v) { state.volume=Number(v); audio.volume=state.volume/100; save(); renderPlayer(); }
+function formatSleep() {
+  const m=Math.floor(state.sleepLeft/60), s=state.sleepLeft%60;
+  return m+':' + (s<10?'0':'') + s + ' 后关闭';
+}
+
+/* 频谱动画 */
+function ensureCanvasSize() {
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(canvas.clientWidth*dpr));
+  const h = Math.max(1, Math.round(canvas.clientHeight*dpr));
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w; canvas.height = h;
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+  }
+}
+function resizeCanvas() { ensureCanvasSize(); }
+function colorAt(ratio, active) {
+  if (!active) return '#3B5470';
+  const c = THEMES[state.theme];
+  return c[Math.max(0,Math.min(c.length-1,Math.floor(ratio*c.length)))];
+}
+function drawSpectrum() {
+  ensureCanvasSize();
+  const w=canvas.clientWidth, h=canvas.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  ctx.strokeStyle='#263A52'; ctx.lineWidth=1;
+  for (let r=1;r<4;r++) { const y=h*r/4; ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(w,y); ctx.stroke(); }
+  const n=levels.length, active=state.playing;
+  if (state.viz===0) {
+    const slot=w/n, bw=slot*.62;
+    for (let i=0;i<n;i++) {
+      const bh=Math.max(3,levels[i]*(h-12)), x=i*slot+(slot-bw)/2, y=h-bh;
+      ctx.fillStyle=colorAt(i/n,active); ctx.fillRect(x,y,bw,bh);
+      if (active && bh>8) { ctx.fillStyle='rgba(255,255,255,.55)'; ctx.fillRect(x,y,bw,2); }
+    }
+  } else if (state.viz===1) {
+    const rows=10, slot=w/n, dot=Math.max(2,slot*.56), gap=(h-rows*dot)/(rows+1);
+    for (let i=0;i<n;i++) {
+      const lit=Math.round(levels[i]*rows), x=i*slot+(slot-dot)/2;
+      for (let r=0;r<rows;r++) {
+        ctx.fillStyle = r>=rows-lit ? colorAt(r/rows,active) : '#22334A';
+        ctx.fillRect(x, gap+r*(dot+gap), dot, dot);
+      }
+    }
+  } else if (state.viz===2) {
+    const mid=h/2;
+    for (const sign of [1,-1]) {
+      ctx.beginPath(); ctx.lineWidth=sign===1?2:3;
+      ctx.strokeStyle=active?(sign===1?THEMES[state.theme][1]:THEMES[state.theme][3]):'#5B6B80';
+      for (let i=0;i<n;i++) {
+        const x=i*w/(n-1), y=mid - sign*levels[i]*h*.42;
+        i?ctx.lineTo(x,y):ctx.moveTo(x,y);
+      }
+      ctx.stroke();
+    }
+    ctx.strokeStyle='#263A52'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(0,mid); ctx.lineTo(w,mid); ctx.stroke();
+  } else {
+    const rowH=22, top=(h-rowH*2-16)/2;
+    const energy=levels.reduce((a,b)=>a+b,0)/n;
+    for (let ch=0;ch<2;ch++) {
+      const y=top+ch*(rowH+16);
+      ctx.fillStyle='#1A2A3E'; ctx.fillRect(0,y,w,rowH);
+      const ratio=active?Math.min(1,energy+ch*.06):.02, segW=w/24, lit=Math.round(ratio*24);
+      for (let s=0;s<lit;s++) {
+        const r=s/24;
+        ctx.fillStyle = r>.88?'#F2637B':(r>.7?'#F5C24B':(active?THEMES[state.theme][4]:'#5B6B80'));
+        ctx.fillRect(s*segW+2,y+3,segW-4,rowH-6);
+      }
+      if (active) { ctx.fillStyle='#fff'; ctx.fillRect(Math.min(w-3,lit*segW),y,3,rowH); }
+    }
+  }
+}
+setInterval(()=>{
+  phase++;
+  for (let i=0;i<levels.length;i++) {
+    let target=.18+.08*Math.sin(i*.45);
+    if (state.playing) {
+      const wave=.52+.23*Math.sin(i*.37+phase*.23)+.15*Math.sin(i*.13-phase*.11)+.12*Math.random();
+      target=Math.max(.08,Math.min(.96,wave));
+    }
+    levels[i]+=(target-levels[i])*.42;
+  }
+  drawSpectrum();
+},160);
+
+/* 设置抽屉 */
+function openSettings() {
+  document.getElementById('sheetHost').innerHTML = `
+    <div class="mask" onclick="closeSettings()"></div>
+    <div class="sheet">
+      <div class="sheet-head"><b>收听设置</b><button onclick="closeSettings()">完成</button></div>
+      <div class="sheet-body">
+        <div class="sec">频谱效果</div>
+        <div class="opt-row">${VIZ_NAMES.map((n,i)=>`<button class="opt ${state.viz===i?'active':''}" onclick="setViz(${i})">${n}</button>`).join('')}</div>
+        <div class="sec">色彩方案</div>
+        <div class="opt-row">${THEMES.map((c,i)=>`<button class="opt theme ${state.theme===i?'active':''}" onclick="setTheme(${i})"><span class="swatches">${c.map(x=>`<i style="background:${x}"></i>`).join('')}</span>${THEME_NAMES[i]}</button>`).join('')}</div>
+        <div class="sec">音量预设</div>
+        <div class="opt-row">${[0,20,40,60,80,100].map(v=>`<button class="opt ${state.volume===v?'active':''}" onclick="setVolume(${v})">${v}</button>`).join('')}</div>
+        <div class="sec">播放模式</div>
+        <div class="switch-row">随机切台<div class="toggle ${state.random?'on':''}" onclick="toggleRandom();openSettings()"><i></i></div></div>
+        <div class="sec">睡眠定时</div>
+        <div class="opt-row">${SLEEP_OPTIONS.map(m=>`<button class="opt ${state.sleepLeft>0&&state.sleepMinutes===m?'active':''}" onclick="setSleep(${m})">${m===0?'关闭':m+' 分'}</button>`).join('')}</div>
+        <div class="sec">关于</div>
+        <div class="about"><b>收音机 · 平板版 1.0.0</b>
+          <p>内置 ${STATIONS.length} 个网络电台，覆盖全国省市与国际外语台。</p>
+          <p>电台数据来自 youdao-tinglibao-e6 收音机示例，流媒体版权归各电台所有。</p>
+          <p>本页为界面预览；完整功能以 HarmonyOS ArkTS 工程为准。</p>
+        </div>
+      </div>
+    </div>`;
+}
+function closeSettings() { document.getElementById('sheetHost').innerHTML=''; }
+function setViz(i) { state.viz=i; save(); renderPlayer(); openSettings(); }
+function setTheme(i) { state.theme=i; save(); renderPlayer(); openSettings(); }
+function setSleep(m) {
+  state.sleepMinutes=m; state.sleepLeft=m*60; renderPlayer(); openSettings();
+  if (m===0) setStatus(state.playing?'正在播放':'准备就绪', state.playing?'playing':'');
+}
+setInterval(()=>{
+  if (state.sleepLeft>0) {
+    state.sleepLeft--;
+    if (state.sleepLeft===0) { audio.pause(); state.playing=false; setStatus('睡眠定时结束'); renderRows(); renderPlayer(); }
+    else renderPlayer();
+  }
+},1000);
+
+/* 窄屏页签 */
+function renderMobileTabs() {
+  document.getElementById('mobileTabs').innerHTML = [
+    ['电台','▦',0],['播放','▶',1],['设置','⚙',2]
+  ].map(([label,icon,i])=>`<button class="${state.pane===i?'active':''}" onclick="setPane(${i})"><span class="ico">${icon}</span>${label}</button>`).join('');
+  if (window.innerWidth<=680) {
+    const list=document.getElementById('listPane'), player=document.getElementById('playerPane');
+    list.className = 'list' + (state.pane===0?'':' hidden-pane');
+    player.className = 'player' + (state.pane===1?'':' hidden-pane');
+    if (state.pane===2) openSettings();
+  }
+}
+function setPane(i) { state.pane=i; closeSettings(); renderMobileTabs(); }
+window.addEventListener('resize', ()=>{ resizeCanvas(); drawSpectrum(); if (window.innerWidth>680) { closeSettings(); state.pane=0; renderMobileTabs(); } });
+
+/* 启动：支持 ?pane=1 直接预览竖屏播放页 */
+state.current = findById(Number(localStorage.getItem('radio_last')||STATIONS[0].id));
+state.pane = Number(new URLSearchParams(location.search).get('pane') || 0);
+audio.addEventListener('error', ()=>{ if (state.loading) { state.loading=false; setStatus('直播流不可用，请换台','error'); } });
+resizeCanvas();
+applyFilter();
+renderMobileTabs();
+setInterval(()=>{
+  const d=new Date();
+  document.getElementById('clock').textContent =
+    String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
+},1000);
+</script>
+</body>
+</html>

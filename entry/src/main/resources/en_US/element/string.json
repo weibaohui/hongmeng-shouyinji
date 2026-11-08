@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "Network Radio for tablet"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "Listen to online radio stations"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "Radio"
+    }
+  ]
+}

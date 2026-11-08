@@ -1,0 +1,26 @@
+# HarmonyOS 构建产物与缓存
+**/build/
+.hvigor/
+.hvigorcache/
+oh_modules/
+**/oh_modules/
+node_modules/
+*.hap
+*.hsp
+*.app
+*.har
+
+# 本地签名配置（含调试证书密码，切勿提交）
+build-profile.local.json5
+
+# 本机工具、IDE 与设备数据
+.workbuddy/
+.atomcode/
+.idea/
+.vscode/
+.DS_Store
+.wireless-device
+*.log
+
+# 预览页调试临时文件
+preview/_probe.html
