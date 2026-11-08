@@ -6,7 +6,7 @@
 
 
 
-> 真机截图：[横屏](preview/device_screenshot.jpeg) · [竖屏播放页](preview/screenshot_portrait.png) · [可交互 HTML 预览](preview/index.html)
+> 真机截图：[横屏](preview/device_screenshot.jpeg) · [竖屏播放页](preview/screenshot_portrait.png) · [12 档音效设置](preview/sound_effects.jpeg) · [可交互 HTML 预览](preview/index.html)（`?settings=1` 展开设置）
 
 ## 功能
 
@@ -16,12 +16,13 @@
 | 筛选  | 范围（全部／收藏／国内／国际）+ 省市胶囊 + 题材胶囊，多维叠加，选中态实时高亮                           |
 | 收藏  | 收藏夹、任意列表内一键收藏，持久化保存                                                 |
 | 播放  | 系统 `AVPlayer` 直连网络流；播放／暂停／停止、音量调节、上一台／下一台、顺序／随机切台                   |
+| 平滑切台 | 切台先淡出旧台再换流、新台从 0 电平淡入；暂停／恢复／停止／拖动音量同样平滑过渡，消除流切换的电平跳变爆音；渐变时长可选关闭／短／标准／舒缓 |
+| 音效  | 12 档端侧听感预设（原声／纯音／新闻／人声／音乐／醇厚／影院／环绕／游戏／收音机／夜间／轻语），组合 `audioRendererInfo.usage` 系统音效链路（音乐／影院／有声书／游戏）、`setLoudnessGain` 响度增益（−12 ~ +6 dB）、感知音量曲线、削峰余量与渐入时长；另提供响度微调（−12 ~ +12 dB）、柔和度、系统音效引擎开关，全部无需云端或自行解码 PCM |
 | 容错  | 播放失败时在 `http` / `https` 备用线路间自动重试一次；明文流由网络安全配置放行                    |
-| 频谱  | Canvas 绘制 4 种样式（频谱柱／LED 点阵／声波／电平表）× 4 套配色（彩虹／灰白／赛博／琥珀）              |
-| 实时字幕 | 系统 `@kit.SpeechKit` 的 `AICaptionComponent`，端侧离线中文识别；5.1.0(18) 起自动识别本应用播放的音频，无需云端密钥或 PCM 喂流，设置中可开关 |
-| 字幕记录 | 把字幕文本连同时间、台名存入 `preferences`（最多 300 条），支持查看、复制全部、清空；重启后仍在 |
+| 频谱  | Canvas 复刻 E6 的 9 种样式（双向镜像／经典柱状／LED 点阵／峰值山峰／动感波峰／环形雷达／瀑布流／粒子散落／分贝电平）× 5 套配色（彩色／灰白／随机／赛博／琥珀） |
+| 实时字幕 | 系统 `@kit.SpeechKit` 的 `AICaptionComponent`，端侧离线中文识别；5.1.0(18) 起自动识别本应用播放的音频，无需云端密钥或 PCM 喂流，设置中可开关；仅显示，不落盘 |
 | 定时  | 睡眠定时 0 / 15 / 30 / 60 / 90 分钟，倒计时显示                                 |
-| 记忆  | `@ohos.data.preferences` 保存收藏、上次收听电台、音量、样式、配色、随机模式                  |
+| 记忆  | `@ohos.data.preferences` 保存收藏、上次收听电台、音量、音效档位／响度微调／柔和度、渐变档位、系统音效开关、样式、配色、随机模式 |
 | 适配  | ≥1000vp 三栏（导航／列表／播放器），680–1000vp 紧凑三栏，<680vp 单栏 + 底部页签；竖屏播放页自顶部纵向铺满 |
 | 资源  | 深色主题、中文／英文文案、应用与启动图标                                                |
 
@@ -69,7 +70,7 @@ entry/src/main/
     RadioStore.ets            筛选、收藏、preferences 持久化
     StationData.ets           静态电台数据汇总入口
     data/StationDataPart*.ets 自动生成的电台分片（请勿手工编辑）
-  ets/player/RadioPlayer.ets  AVPlayer 封装、状态机、备用线路重试
+  ets/player/RadioPlayer.ets  AVPlayer 封装、状态机、音量渐变引擎、端侧音效预设、备用线路重试
   ets/view/SpectrumPainter.ets Canvas 频谱绘制
   resources/                  颜色、字符串、图标、页面路由、网络安全配置
 preview/                     可交互 HTML 原型 + 各尺寸／真机截图
@@ -112,7 +113,7 @@ python3 tools/export_stations.py /path/to/radio.db
 
 脚本会同时更新 `entry/src/main/ets/model/data/StationDataPart{1..4}.ets` 和 `preview/stations.js`，并把已验证支持 TLS 的明文域名优先升级为 `https`。应用图标可用 `python3 tools/gen_icons.py` 重新生成。
 
-HTML 预览直接用浏览器打开 `preview/index.html`（`?pane=1` 直接打开竖屏播放页），点选电台、筛选、收藏、设置与频谱动画均可交互。浏览器的音频播放受协议／跨域限制，**能否出声以鸿蒙真机为准**。
+HTML 预览直接用浏览器打开 `preview/index.html`（`?pane=1` 打开竖屏播放页，`?settings=1` 直接展开设置抽屉），点选电台、筛选、收藏、设置与频谱动画均可交互。浏览器的音频播放受协议／跨域限制，**能否出声以鸿蒙真机为准**。
 
 ## 已知限制
 
@@ -120,8 +121,9 @@ HTML 预览直接用浏览器打开 `preview/index.html`（`?pane=1` 直接打�
 - 仅支持前台播放，未接入 `AVSession`／后台播放／锁屏控制；睡眠定时基于前台页面计时，应用退到后台不保证按时停止。
 - 电台流地址来自第三方公开数据，可能失效或变更，本项目不保证其可用性；部分流为 HTTP 明文，已在 `network_config.json` 放行。
 - 电台数据及流地址的版权归原作者与各电台所有，公开使用前请自行确认使用许可。
-- **字幕只能手动存**：`AICaptionComponent` 只负责显示，`AICaptionOptions` 仅提供 `onPrepared` / `onError`，不向应用回传识别文本，所以「字幕记录」需要用户粘贴或输入内容。实测第三方应用无法内录本应用音频（`SOURCE_TYPE_PLAYBACK_CAPTURE` 返回 `6800301`，且 `CAPTURE_VOICE_DOWNLINK_AUDIO` 为 `system_basic` 权限），麦克风只能采集外放环境音，`READ_PASTEBOARD` 同样是系统级权限。若要全自动落盘，需改为自解码播放链路（PCM → `speechRecognizer.writeAudio`）或对字幕区域做端侧 OCR。
-- 打开设置面板时，系统字幕浮层会遮挡面板下半部；「字幕记录」入口已放在设置面板顶部以避开该区域。
+- **字幕只显示、不保存**：`AICaptionComponent` 不向应用回传识别文本（`AICaptionOptions` 只有 `onPrepared` / `onError`）。实测第三方应用无法内录本应用音频（`SOURCE_TYPE_PLAYBACK_CAPTURE` 返回 `6800301`，`CAPTURE_VOICE_DOWNLINK_AUDIO` 为 `system_basic` 权限），麦克风只能采集外放环境音，`READ_PASTEBOARD` 同样是系统级权限，因此未实现字幕落盘。若要全自动保存，需改为自解码播放链路（PCM → `speechRecognizer.writeAudio`）或对字幕区域做端侧 OCR。
+- 打开设置面板时，系统字幕浮层会遮挡面板下半部，操作上半部的音效／渐变项不受影响。
+- **音效依赖系统能力**：ArkTS 层没有开放播放均衡器／AudioSuite（后者只有 native C API，且需要自解码拿到 PCM），`audioEffectMode` 只有 `EFFECT_NONE` / `EFFECT_DEFAULT` 两档。因此预设的听感差异来自 `usage` 对应的系统音效链路、`setLoudnessGain`（API 21+，老设备静默忽略）、音量曲线与渐入时长，是「调音」而非逐频段 EQ；不同机型外放上的实际差别会有不同。想拉开更明显的差距可用「响度」微调滑杆（−12 ~ +12 dB）；正增益拉得过高可能削波失真，收听大动态节目时建议配合削峰余量较大的「夜间／轻语」档。只有系统音效场景（usage）变化时才需要平滑重连当前流，其余参数即时生效。
 
 ## 许可证
 

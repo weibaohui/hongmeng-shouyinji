@@ -1,14 +1,15 @@
 import { window } from '@kit.ArkUI';
 import { common } from '@kit.AbilityKit';
-import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
+import { BusinessError } from '@kit.BasicServicesKit';
 import { AICaptionComponent, AICaptionController, AICaptionOptions } from '@kit.SpeechKit';
-import { CaptionLog, CaptionRecord } from '../model/CaptionLog';
 import {
   Station, Scope, Palette, SCOPE_NAMES, VIZ_NAMES, THEME_NAMES, SLEEP_OPTIONS, themeColors
 } from '../model/Station';
 import { ALL_STATIONS } from '../model/StationData';
 import { RadioStore } from '../model/RadioStore';
-import { RadioPlayer, PlayState } from '../player/RadioPlayer';
+import {
+  RadioPlayer, PlayState, SOUND_NAMES, SOUND_HINTS, SOUND_EFFECTS, FADE_NAMES
+} from '../player/RadioPlayer';
 import { SpectrumPainter } from '../view/SpectrumPainter';
 
 /** 主页面：平板三栏（导航 / 电台列表 / 播放器），窄屏自动降级为单栏 + 底部页签。 */
@@ -41,11 +42,13 @@ struct Index {
   @State settingsOpen: boolean = false;
   @State clock: string = '';
   @State captionOn: boolean = false;
-  @State captionLogOpen: boolean = false;
-  @State captionRecords: CaptionRecord[] = [];
-  @State captionInput: string = '';
-
-  private captionLog: CaptionLog = new CaptionLog();
+  @State soundPreset: number = 0;
+  @State fadePreset: number = 2;
+  @State systemEffect: boolean = true;
+  @State userGain: number = 0;
+  @State userCurve: number = 0;
+  @State soundNames: string[] = SOUND_NAMES.slice();
+  @State fadeNames: string[] = FADE_NAMES.slice();
 
   /** 系统 AI 字幕能力：端侧识别，无需任何云端密钥。 */
   private captionSupported: boolean = canIUse('SystemCapability.AI.AICaption');
@@ -75,8 +78,6 @@ struct Index {
   aboutToAppear(): void {
     const ctx: common.UIAbilityContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
     this.store.init(ctx);
-    this.captionLog.init(ctx);
-    this.captionRecords = this.captionLog.all();
     const cfg = this.store.config;
     this.current = this.store.findById(cfg.lastId);
     this.favorites = cfg.favorites.slice();
@@ -84,6 +85,11 @@ struct Index {
     this.vizStyle = cfg.vizStyle;
     this.colorTheme = cfg.colorTheme;
     this.randomMode = cfg.random;
+    this.soundPreset = cfg.soundPreset;
+    this.fadePreset = cfg.fadePreset;
+    this.systemEffect = cfg.systemEffect;
+    this.userGain = cfg.userGain;
+    this.userCurve = cfg.userCurve;
     this.sleepMinutes = 0;
     this.scope = cfg.scope;
     this.province = cfg.province;
@@ -94,14 +100,20 @@ struct Index {
       this.playState = state;
       this.statusText = message;
     };
+    this.player.setSoundProfile(this.soundPreset);
+    this.player.setFadePreset(this.fadePreset);
+    this.player.setSystemEffect(this.systemEffect);
+    this.player.setUserGain(this.userGain);
+    this.player.setUserCurve(this.userCurve);
     this.player.setVolume(this.volume);
     this.applyFilter(true);
     this.observeWindow();
     this.updateClock();
+    this.painter.setTheme(this.colorTheme);
     this.animationTimer = setInterval(() => {
       this.painter.tick(this.isPlaying());
       this.drawFrame();
-    }, 160);
+    }, 70);
     this.secondTimer = setInterval(() => {
       this.updateClock();
       this.tickSleep();
@@ -209,6 +221,11 @@ struct Index {
     cfg.vizStyle = this.vizStyle;
     cfg.colorTheme = this.colorTheme;
     cfg.random = this.randomMode;
+    cfg.soundPreset = this.soundPreset;
+    cfg.fadePreset = this.fadePreset;
+    cfg.systemEffect = this.systemEffect;
+    cfg.userGain = this.userGain;
+    cfg.userCurve = this.userCurve;
     cfg.sleepMinutes = 0;
     cfg.scope = this.scope;
     cfg.province = this.province;
@@ -245,6 +262,8 @@ struct Index {
   private playStation(station: Station): void {
     this.current = station;
     this.persist();
+    // 随机配色换台重掷色相（对齐 E6 playStationObj）
+    this.painter.reseedRandom();
     this.player.play(station.url);
   }
 
@@ -321,37 +340,41 @@ struct Index {
     return this.isWide() ? '33%' : '38%';
   }
 
-  // ============================== 字幕记录 ==============================
-
-  private openCaptionLog(): void {
-    this.settingsOpen = false;
-    this.captionRecords = this.captionLog.all();
-    this.captionLogOpen = true;
+  private setSoundPreset(index: number): void {
+    this.soundPreset = index;
+    this.soundNames = SOUND_NAMES.slice();
+    this.systemEffect = (index >= 0 && index < SOUND_EFFECTS.length) ? SOUND_EFFECTS[index] : true;
+    this.player.setSoundProfile(index);
+    this.persist();
   }
 
-  private saveCaption(): void {
-    this.captionRecords = this.captionLog.add(this.current.name, this.captionInput);
-    this.captionInput = '';
+  private soundHint(): string {
+    const i: number = this.soundPreset;
+    const base: string = (i >= 0 && i < SOUND_HINTS.length) ? SOUND_HINTS[i] : '';
+    const g: number = this.userGain;
+    const extra: string = g === 0 ? '' : ' · 微调 ' + (g > 0 ? '+' : '') + g.toString() + 'dB';
+    return base + extra;
   }
 
-  private clearCaptions(): void {
-    this.captionRecords = this.captionLog.clear();
+  private gainLabel(): string {
+    return (this.userGain > 0 ? '+' : '') + this.userGain.toString() + 'dB';
   }
 
-  private copyCaptions(): void {
-    const text: string = this.captionLog.exportText();
-    if (text.length === 0) {
-      this.statusText = '暂无记录';
-      return;
-    }
-    try {
-      const data: pasteboard.PasteData = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, text);
-      pasteboard.getSystemPasteboard().setData(data).then(() => {
-        this.statusText = '已复制 ' + this.captionRecords.length.toString() + ' 条';
-      });
-    } catch (e) {
-      this.statusText = '复制失败';
-    }
+  private curveLabel(): string {
+    return this.userCurve === 0 ? '跟随' : this.userCurve.toFixed(1);
+  }
+
+  private setFadePreset(index: number): void {
+    this.fadePreset = index;
+    this.fadeNames = FADE_NAMES.slice();
+    this.player.setFadePreset(index);
+    this.persist();
+  }
+
+  private setSystemEffect(on: boolean): void {
+    this.systemEffect = on;
+    this.player.setSystemEffect(on);
+    this.persist();
   }
 
   // ============================== 页面骨架 ==============================
@@ -436,23 +459,6 @@ struct Index {
         .position({ x: this.isTablet() ? '56%' : '4%', y: '66%' })
       }
 
-      if (this.captionLogOpen) {
-        Column()
-          .width('100%')
-          .height('100%')
-          .backgroundColor('#A6000000')
-          .onClick(() => {
-            this.captionLogOpen = false;
-          })
-        Column() {
-          this.captionLogPane()
-        }
-        .width(this.isTablet() ? 460 : '92%')
-        .height('86%')
-        .backgroundColor(Palette.SURFACE)
-        .borderRadius(20)
-        .border({ width: 1, color: Palette.BORDER })
-      }
     }
     .width('100%')
     .height('100%')
@@ -1203,110 +1209,6 @@ struct Index {
     })
   }
 
-  /** 字幕记录本：粘贴 / 输入字幕内容并落盘，支持查看、复制全部与清空。 */
-  @Builder
-  captionLogPane() {
-    Column() {
-      Row() {
-        Text('字幕记录')
-          .fontSize(20)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(Palette.TEXT)
-        Blank()
-        Text('关闭')
-          .fontSize(13)
-          .fontColor(Palette.BLUE)
-          .onClick(() => {
-            this.captionLogOpen = false;
-          })
-      }
-      .width('100%')
-      .padding({ left: 20, right: 20, top: 20, bottom: 14 })
-
-      TextInput({ placeholder: '粘贴或输入字幕内容', text: this.captionInput })
-        .fontSize(13)
-        .fontColor(Palette.TEXT)
-        .placeholderColor(Palette.TEXT_FAINT)
-        .backgroundColor(Palette.SURFACE_2)
-        .height(42)
-        .borderRadius(10)
-        .padding({ left: 12, right: 12 })
-        .width('100%')
-        .margin({ left: 20, right: 20 })
-        .onChange((value: string) => {
-          this.captionInput = value;
-        })
-
-      Row() {
-        Text('保存')
-          .fontSize(12)
-          .fontColor('#FFFFFF')
-          .padding({ left: 16, right: 16, top: 8, bottom: 8 })
-          .borderRadius(9)
-          .backgroundColor(Palette.BLUE)
-          .onClick(() => {
-            this.saveCaption();
-          })
-        Text('复制全部')
-          .fontSize(12)
-          .fontColor(Palette.TEXT_DIM)
-          .padding({ left: 14, right: 14, top: 8, bottom: 8 })
-          .borderRadius(9)
-          .backgroundColor(Palette.SURFACE_2)
-          .margin({ left: 8 })
-          .onClick(() => {
-            this.copyCaptions();
-          })
-        Blank()
-        Text('清空')
-          .fontSize(12)
-          .fontColor(Palette.TEXT_FAINT)
-          .onClick(() => {
-            this.clearCaptions();
-          })
-      }
-      .width('100%')
-      .margin({ top: 12, bottom: 12 })
-      .padding({ left: 20, right: 20 })
-
-      Scroll() {
-        Column() {
-          if (this.captionRecords.length === 0) {
-            Text('暂无记录')
-              .fontSize(12)
-              .fontColor(Palette.TEXT_FAINT)
-              .margin({ top: 40 })
-          }
-          ForEach(this.captionRecords.slice().reverse(), (rec: CaptionRecord) => {
-            Column() {
-              Text(rec.time + '  ' + rec.station)
-                .fontSize(10)
-                .fontColor(Palette.TEXT_FAINT)
-              Text(rec.text)
-                .fontSize(13)
-                .fontColor(Palette.TEXT)
-                .width('100%')
-                .margin({ top: 5 })
-            }
-            .width('100%')
-            .padding(12)
-            .borderRadius(10)
-            .backgroundColor(Palette.SURFACE_2)
-            .alignItems(HorizontalAlign.Start)
-            .margin({ bottom: 8 })
-          }, (rec: CaptionRecord) => rec.time + rec.text)
-        }
-        .width('100%')
-        .padding({ left: 20, right: 20, bottom: 20 })
-      }
-      .layoutWeight(1)
-      .scrollBar(BarState.Off)
-      .align(Alignment.Top)
-    }
-    .width('100%')
-    .height('100%')
-  }
-
   // ============================== 设置 ==============================
 
   @Builder
@@ -1333,23 +1235,139 @@ struct Index {
 
       Scroll() {
         Column() {
+          Text('音效')
+            .fontSize(13)
+            .fontColor(Palette.TEXT)
+            .width('100%')
+            .margin({ bottom: 8 })
+
+          Flex({ wrap: FlexWrap.Wrap }) {
+            ForEach(this.soundNames, (name: string, index: number) => {
+              Text(name)
+                .fontSize(11)
+                .fontColor(this.soundPreset === index ? '#FFFFFF' : Palette.TEXT_DIM)
+                .padding({ left: 11, right: 11, top: 8, bottom: 8 })
+                .borderRadius(9)
+                .backgroundColor(this.soundPreset === index ? Palette.BLUE : Palette.SURFACE_2)
+                .margin({ right: 6, bottom: 6 })
+                .onClick(() => {
+                  this.setSoundPreset(index);
+                })
+            }, (name: string) => name)
+          }
+          .width('100%')
+          .margin({ bottom: 8 })
+
+          Text(this.soundHint())
+            .fontSize(11)
+            .fontColor(Palette.TEXT_FAINT)
+            .width('100%')
+            .margin({ bottom: 12 })
+
           Row() {
-            Text('字幕记录')
+            Text('响度')
+              .fontSize(12)
+              .fontColor(Palette.TEXT_DIM)
+              .width(40)
+            Slider({
+              value: this.userGain,
+              min: -12,
+              max: 12,
+              step: 1,
+              style: SliderStyle.OutSet
+            })
+              .layoutWeight(1)
+              .selectedColor(Palette.BLUE)
+              .trackColor(Palette.SURFACE_2)
+              .blockColor('#FFFFFF')
+              .onChange((value: number, mode: SliderChangeMode) => {
+                this.userGain = Math.round(value);
+                this.player.setUserGain(this.userGain);
+                if (mode === SliderChangeMode.End) {
+                  this.persist();
+                }
+              })
+            Text(this.gainLabel())
+              .fontSize(12)
+              .fontColor(Palette.TEXT)
+              .width(48)
+              .textAlign(TextAlign.End)
+          }
+          .width('100%')
+          .margin({ bottom: 6 })
+
+          Row() {
+            Text('柔和')
+              .fontSize(12)
+              .fontColor(Palette.TEXT_DIM)
+              .width(40)
+            Slider({
+              value: this.userCurve,
+              min: 0,
+              max: 2.4,
+              step: 0.1,
+              style: SliderStyle.OutSet
+            })
+              .layoutWeight(1)
+              .selectedColor(Palette.BLUE)
+              .trackColor(Palette.SURFACE_2)
+              .blockColor('#FFFFFF')
+              .onChange((value: number, mode: SliderChangeMode) => {
+                this.userCurve = Math.round(value * 10) / 10;
+                this.player.setUserCurve(this.userCurve);
+                if (mode === SliderChangeMode.End) {
+                  this.persist();
+                }
+              })
+            Text(this.curveLabel())
+              .fontSize(12)
+              .fontColor(Palette.TEXT)
+              .width(48)
+              .textAlign(TextAlign.End)
+          }
+          .width('100%')
+          .margin({ bottom: 14 })
+
+          Row() {
+            Text('切台渐变')
+              .fontSize(13)
+              .fontColor(Palette.TEXT)
+              .margin({ right: 10 })
+            Flex({ wrap: FlexWrap.Wrap }) {
+              ForEach(this.fadeNames, (name: string, index: number) => {
+                Text(name)
+                  .fontSize(11)
+                  .fontColor(this.fadePreset === index ? '#FFFFFF' : Palette.TEXT_DIM)
+                  .padding({ left: 10, right: 10, top: 8, bottom: 8 })
+                  .borderRadius(9)
+                  .backgroundColor(this.fadePreset === index ? Palette.BLUE : Palette.SURFACE_2)
+                  .margin({ right: 6, bottom: 6 })
+                  .onClick(() => {
+                    this.setFadePreset(index);
+                  })
+              }, (name: string) => name)
+            }
+            .layoutWeight(1)
+          }
+          .width('100%')
+          .margin({ bottom: 14 })
+
+          Row() {
+            Text('系统音效')
               .fontSize(13)
               .fontColor(Palette.TEXT)
             Blank()
-            Text(this.captionRecords.length.toString() + ' 条 ›')
-              .fontSize(12)
-              .fontColor(Palette.BLUE)
+            Toggle({ type: ToggleType.Switch, isOn: this.systemEffect })
+              .selectedColor(Palette.BLUE)
+              .onChange((isOn: boolean) => {
+                this.setSystemEffect(isOn);
+              })
           }
           .width('100%')
           .padding(14)
           .borderRadius(12)
           .backgroundColor(Palette.SURFACE_2)
           .margin({ bottom: 18 })
-          .onClick(() => {
-            this.openCaptionLog();
-          })
 
           Flex({ wrap: FlexWrap.Wrap }) {
             ForEach(VIZ_NAMES, (name: string, index: number) => {
@@ -1393,6 +1411,7 @@ struct Index {
               .margin({ right: 6, bottom: 6 })
               .onClick(() => {
                 this.colorTheme = index;
+                this.painter.setTheme(index);
                 this.persist();
                 this.drawFrame();
               })

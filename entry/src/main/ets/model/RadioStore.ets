@@ -11,6 +11,11 @@ export class RadioConfig {
   vizStyle: number = 0;
   colorTheme: number = 0;
   random: boolean = false;
+  soundPreset: number = 0;
+  fadePreset: number = 2;
+  systemEffect: boolean = true;
+  userGain: number = 0;
+  userCurve: number = 0;
   sleepMinutes: number = 0;
   scope: number = 0;
   province: string = '全部';
@@ -50,7 +55,13 @@ export class RadioStore {
       c.favorites = this.parseIds(p.getSync('favorites', '') as string);
       c.vizStyle = p.getSync('vizStyle', 0) as number;
       c.colorTheme = p.getSync('colorTheme', 0) as number;
+      this.migrateViz(p, c);
       c.random = p.getSync('random', false) as boolean;
+      c.soundPreset = p.getSync('soundPreset', 0) as number;
+      c.fadePreset = p.getSync('fadePreset', 2) as number;
+      c.systemEffect = p.getSync('systemEffect', true) as boolean;
+      c.userGain = p.getSync('userGain', 0) as number;
+      c.userCurve = p.getSync('userCurve', 0) as number;
       c.sleepMinutes = p.getSync('sleepMinutes', 0) as number;
       c.scope = p.getSync('scope', 0) as number;
       c.province = p.getSync('province', '全部') as string;
@@ -58,6 +69,27 @@ export class RadioStore {
     } catch (e) {
       this.prefs = null;
     }
+  }
+
+  /**
+   * 频谱样式/配色枚举升级到 E6 九样式版后的一次性迁移：
+   * 旧 4 样式（频谱柱/LED/声波/电平表）映射到新 1/2/4/8；旧配色 2=赛博 3=琥珀 顺位后移。
+   */
+  private migrateViz(p: preferences.Preferences, c: RadioConfig): void {
+    if (p.getSync('vizStyleV2', false) as boolean) {
+      return;
+    }
+    const oldToNew: number[] = [1, 2, 4, 8];
+    if (c.vizStyle >= 0 && c.vizStyle < oldToNew.length) {
+      c.vizStyle = oldToNew[c.vizStyle];
+    }
+    if (c.colorTheme === 2) {
+      c.colorTheme = 3;
+    } else if (c.colorTheme === 3) {
+      c.colorTheme = 4;
+    }
+    p.putSync('vizStyleV2', true);
+    p.flushSync();
   }
 
   save(): void {
@@ -73,6 +105,11 @@ export class RadioStore {
       p.putSync('vizStyle', c.vizStyle);
       p.putSync('colorTheme', c.colorTheme);
       p.putSync('random', c.random);
+      p.putSync('soundPreset', c.soundPreset);
+      p.putSync('fadePreset', c.fadePreset);
+      p.putSync('systemEffect', c.systemEffect);
+      p.putSync('userGain', c.userGain);
+      p.putSync('userCurve', c.userCurve);
       p.putSync('sleepMinutes', c.sleepMinutes);
       p.putSync('scope', c.scope);
       p.putSync('province', c.province);

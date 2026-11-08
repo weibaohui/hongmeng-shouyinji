@@ -283,6 +283,11 @@ const state = {
   viz: Number(localStorage.getItem('radio_viz') || 0),
   theme: Number(localStorage.getItem('radio_theme') || 0),
   random: localStorage.getItem('radio_random') === '1',
+  sound: Number(localStorage.getItem('radio_sound') || 0),
+  fade: Number(localStorage.getItem('radio_fade') || 2),
+  sysEffect: localStorage.getItem('radio_sys_effect') !== '0',
+  gain: Number(localStorage.getItem('radio_gain') || 0),
+  curve: Number(localStorage.getItem('radio_curve') || 0),
   sleepLeft:0, pane:0
 };
 const audio = new Audio();
@@ -305,6 +310,11 @@ function save() {
   localStorage.setItem('radio_viz', state.viz);
   localStorage.setItem('radio_theme', state.theme);
   localStorage.setItem('radio_random', state.random ? '1' : '0');
+  localStorage.setItem('radio_sound', state.sound);
+  localStorage.setItem('radio_fade', state.fade);
+  localStorage.setItem('radio_sys_effect', state.sysEffect ? '1' : '0');
+  localStorage.setItem('radio_gain', state.gain);
+  localStorage.setItem('radio_curve', state.curve);
 }
 function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -528,6 +538,17 @@ setInterval(()=>{
   drawSpectrum();
 },160);
 
+/* 音效预设：名称 + 参数摘要，与 ArkTS 工程 RadioPlayer.ets 保持一致 */
+const SOUND_PRESETS = [
+  ['原声','标准 · 0dB · 420ms'], ['纯音','关闭系统音效 · 0dB'],
+  ['新闻','人声链路 · +4dB'], ['人声','人声链路 · +1dB · 缓入'],
+  ['音乐','音乐链路 · +3dB'], ['醇厚','音乐链路 · +6dB · 强增益'],
+  ['影院','影院链路 · +2dB'], ['环绕','影院链路 · +5dB · 长渐入'],
+  ['游戏','低延迟链路 · 快入'], ['收音机','温和 · -5dB · 柔曲线'],
+  ['夜间','轻音 · -9dB · 慢入'], ['轻语','极轻 · -12dB']
+];
+const SOUND_EFFECTS = [true,false,true,true,true,true,true,true,false,false,true,false];
+
 /* 设置抽屉 */
 function openSettings() {
   document.getElementById('sheetHost').innerHTML = `
@@ -535,6 +556,14 @@ function openSettings() {
     <div class="sheet">
       <div class="sheet-head"><b>收听设置</b><button onclick="closeSettings()">完成</button></div>
       <div class="sheet-body">
+        <div style="font-size:12px;color:var(--text);margin:0 0 8px">音效</div>
+        <div class="opt-row">${SOUND_PRESETS.map((p,i)=>`<button class="opt ${state.sound===i?'active':''}" onclick="setSound(${i})">${p[0]}</button>`).join('')}</div>
+        <div id="soundHint" style="font-size:11px;color:var(--faint);margin:0 0 10px">${soundHintText()}</div>
+        <div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);margin-bottom:8px"><span style="width:34px">响度</span><input type="range" style="flex:1" min="-12" max="12" step="1" value="${state.gain}" oninput="setGain(this.value)"><b id="gainVal" style="width:46px;text-align:right">${state.gain>0?'+':''}${state.gain}dB</b></div>
+        <div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);margin-bottom:12px"><span style="width:34px">柔和</span><input type="range" style="flex:1" min="0" max="2.4" step="0.1" value="${state.curve}" oninput="setCurve(this.value)"><b id="curveVal" style="width:46px;text-align:right">${state.curve===0?'跟随':state.curve.toFixed(1)}</b></div>
+        <div style="font-size:12px;color:var(--text);margin:0 0 8px">切台渐变</div>
+        <div class="opt-row">${['关闭','短','标准','舒缓'].map((n,i)=>`<button class="opt ${state.fade===i?'active':''}" onclick="setFade(${i})">${n}</button>`).join('')}</div>
+        <div class="switch-row">系统音效<div class="toggle ${state.sysEffect?'on':''}" onclick="toggleSysEffect();openSettings()"><i></i></div></div>
         <div class="sec">频谱效果</div>
         <div class="opt-row">${VIZ_NAMES.map((n,i)=>`<button class="opt ${state.viz===i?'active':''}" onclick="setViz(${i})">${n}</button>`).join('')}</div>
         <div class="sec">色彩方案</div>
@@ -555,6 +584,22 @@ function openSettings() {
     </div>`;
 }
 function closeSettings() { document.getElementById('sheetHost').innerHTML=''; }
+function soundHintText() {
+  const i=(state.sound>=0 && state.sound<SOUND_PRESETS.length)?state.sound:0;
+  return SOUND_PRESETS[i][1]+(state.gain?` · 微调 ${state.gain>0?'+':''}${state.gain}dB`:'');
+}
+function setSound(i) { state.sound=i; state.sysEffect=SOUND_EFFECTS[i]===true; save(); openSettings(); }
+function setFade(i) { state.fade=i; save(); openSettings(); }
+function toggleSysEffect() { state.sysEffect=!state.sysEffect; save(); }
+function setGain(v) {
+  state.gain=Number(v); save();
+  const b=document.getElementById('gainVal'); if(b) b.textContent=(state.gain>0?'+':'')+state.gain+'dB';
+  const h=document.getElementById('soundHint'); if(h) h.textContent=soundHintText();
+}
+function setCurve(v) {
+  state.curve=Number(v); save();
+  const b=document.getElementById('curveVal'); if(b) b.textContent=state.curve===0?'跟随':state.curve.toFixed(1);
+}
 function setViz(i) { state.viz=i; save(); renderPlayer(); openSettings(); }
 function setTheme(i) { state.theme=i; save(); renderPlayer(); openSettings(); }
 function setSleep(m) {
@@ -584,7 +629,7 @@ function renderMobileTabs() {
 function setPane(i) { state.pane=i; closeSettings(); renderMobileTabs(); }
 window.addEventListener('resize', ()=>{ resizeCanvas(); drawSpectrum(); if (window.innerWidth>680) { closeSettings(); state.pane=0; renderMobileTabs(); } });
 
-/* 启动：支持 ?pane=1 直接预览竖屏播放页 */
+/* 启动：支持 ?pane=1 预览竖屏播放页、?settings=1 直接打开设置 */
 state.current = findById(Number(localStorage.getItem('radio_last')||STATIONS[0].id));
 state.pane = Number(new URLSearchParams(location.search).get('pane') || 0);
 audio.addEventListener('error', ()=>{ if (state.loading) { state.loading=false; setStatus('直播流不可用，请换台','error'); } });
@@ -596,6 +641,7 @@ setInterval(()=>{
   document.getElementById('clock').textContent =
     String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
 },1000);
+if (new URLSearchParams(location.search).get('settings') === '1') setTimeout(openSettings, 120);
 </script>
 </body>
 </html>
