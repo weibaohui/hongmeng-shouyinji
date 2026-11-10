@@ -53,6 +53,13 @@ class SpectrumAnalyzer {
   std::string Message();
   /** 最近一次计算出的 16 个频段能量（0~1）；尚未有数据时返回空数组。 */
   std::vector<double> Bands();
+  /**
+   * 最近一帧的节目电平（dBFS，-60 ~ 0）。
+   * 与 Bands 不同，这里统计的是一整拍（约 70ms）PCM 的均方根，
+   * 用来做音量归一化：不同电台的推流响度差别很大，靠这个值算出各自的修正增益。
+   * 没有数据时返回 -120（等价于静音）。
+   */
+  double LevelDb();
   /** 每产出一帧新频谱就自增，UI 用它判断数据是否还在更新。 */
   long long Sequence();
 
@@ -70,6 +77,11 @@ class SpectrumAnalyzer {
   /** 只有当前会话才能改状态，避免已被替换的旧会话把 UI 状态改乱。 */
   void SetSessionStatus(int token, int code, const std::string &message);
   void Publish(const std::vector<double> &bands, int token);
+  /**
+   * 取走并清空上一拍累积的能量与采样数，算出这一拍的 RMS 电平。
+   * 与频段计算共用同一个「拍」，所以音量数据和波形在时间上是对齐的。
+   */
+  double TakeLevelDb();
   /** 把交错 PCM 混成单声道并追加到分析缓冲。 */
   void AppendPcm(const int16_t *data, int sampleCount, int channels);
   void AppendPcmFloat(const float *data, int sampleCount, int channels);
@@ -121,6 +133,16 @@ class SpectrumAnalyzer {
 
   std::mutex pcmMu_;
   std::vector<int16_t> mono_;
+
+  /**
+   * 节目电平计量：解码线程把每帧的能量累加进来，出帧时取走一次算 RMS。
+   * 单独一把锁，避免和频段用的 pcmMu_ 抢锁。
+   */
+  std::mutex levelMu_;
+  double levelEnergy_ = 0.0;
+  long long levelSamples_ = 0;
+  /** 最近一帧算出的节目电平（dBFS），供 ArkTS 侧读取。 */
+  std::atomic<double> levelDb_{-120.0};
 
   std::atomic<int> sampleRate_{44100};
   std::atomic<int> channels_{2};

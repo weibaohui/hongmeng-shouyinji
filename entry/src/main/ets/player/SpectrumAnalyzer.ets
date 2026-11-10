@@ -70,4 +70,15 @@ export class SpectrumAnalyzer {
     }
     return this.cachedBands;
   }
+
+  /**
+   * 最近一帧的节目电平（dBFS，-120 ~ 0）。
+   * 音量归一化靠它判断这一台到底有多响；没有数据时返回 -120。
+   */
+  levelDb(): number {
+    if (!this.active) {
+      return -120;
+    }
+    return spectrum.level() as number;
+  }
 }

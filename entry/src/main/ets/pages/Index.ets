@@ -14,6 +14,7 @@ import {
 import { RadioService } from '../player/RadioService';
 import { SpectrumPainter } from '../view/SpectrumPainter';
 import { SpectrumAnalyzer } from '../player/SpectrumAnalyzer';
+import { LoudnessNormalizer } from '../player/LoudnessNormalizer';
 
 /** 取异常文本：连取错误信息都可能再抛一次，这里必须绝对安全。 */
 function safeErrorText(e: Object): string {
@@ -75,7 +76,7 @@ struct Index {
   @State sleepLeft: number = 0;
   @State settingsOpen: boolean = false;
   @State filterOpen: boolean = false;
-  @State scopeCounts: number[] = [0, 0, 0, 0];
+  @State scopeCounts: number[] = [0, 0, 0, 0, 0];
   @State clock: string = '';
   @State captionOn: boolean = false;
   @State soundPreset: number = 0;
@@ -85,6 +86,12 @@ struct Index {
   @State userCurve: number = 0;
   @State soundNames: string[] = SOUND_NAMES.slice();
   @State fadeNames: string[] = FADE_NAMES.slice();
+  /** 音量归一化开关。开着就必须走真实音频解析：要 PCM 才测得出电平。 */
+  @State normEnabled: boolean = true;
+  /** 当前台已生效的归一化修正增益（dB）。 */
+  @State normGain: number = 0;
+  /** 归一化状态提示，显示在设置面板里。 */
+  @State normHint: string = '';
 
   /** 系统 AI 字幕能力：端侧识别，无需任何云端密钥。 */
   private captionSupported: boolean = canIUse('SystemCapability.AI.AICaption');
@@ -109,6 +116,12 @@ struct Index {
   private painter: SpectrumPainter = new SpectrumPainter();
   /** 真实频谱：原生拉流解码 + FFT，不采集麦克风。 */
   private analyzer: SpectrumAnalyzer = new SpectrumAnalyzer();
+  /** 音量归一化：把实测电平换算成这一台该补多少 dB。 */
+  private normalizer: LoudnessNormalizer = new LoudnessNormalizer();
+  /** 上次把归一化增益写进偏好文件的时间，用来限流落盘。 */
+  private lastNormPersistAt: number = 0;
+  /** 上次重新计算归一化增益的时间。分位数排序不必每帧都做，一秒一次足够。 */
+  private lastNormCalcAt: number = 0;
   private renderSettings: RenderingContextSettings = new RenderingContextSettings(true);
   private canvasCtx: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.renderSettings);
   private canvasWidth: number = 520;
@@ -163,6 +176,13 @@ struct Index {
     this.scope = cfg.scope;
     this.province = cfg.province;
     this.genre = cfg.genre;
+    this.normEnabled = cfg.normalize;
+    // 归一化与真实解析是绑定的：没有 PCM 就测不出电平。
+    // 所以归一化开着时频谱只能是「真实」，反之才能退回「模拟」。
+    if (this.normEnabled && this.vizMode !== 1) {
+      this.vizMode = 1;
+    }
+    this.normGain = this.store.normGain(this.current.id);
     this.provinceOptions = this.store.provinces();
     this.genreOptions = this.store.genres();
     // 绑定播放服务：建立播控中心会话，并把页面订阅接到服务状态上。
@@ -180,6 +200,15 @@ struct Index {
       this.current = station;
       this.refreshNeighborNames(station);
       this.painter.reseedRandom();
+      // 换台后这一台的测量要重来，归一化增益换成新台自己的。
+      this.normalizer.reset();
+      this.applyStationNormGain(station.id);
+      // 收听历史：只记真正开播的台，锁屏卡片切台同样算数。
+      this.store.pushRecent(station.id);
+      this.computeScopeCounts();
+      if (this.scope === Scope.Recent) {
+        this.applyFilter();
+      }
       this.persist();
       if (this.vizMode === 1 && this.pageVisible) {
         // 旧台的频段立刻清掉，新流连上之前先按静音画，不要残留上一家的波形
@@ -196,6 +225,7 @@ struct Index {
     this.service.setSystemEffect(this.systemEffect);
     this.service.setUserGain(this.userGain);
     this.service.setUserCurve(this.userCurve);
+    this.service.setNormGain(this.normGain);
     this.service.setVolume(this.volume);
     this.service.setRandom(this.randomMode);
     this.applyFilter(true);
@@ -223,6 +253,9 @@ struct Index {
     }, 1000);
     // 页面注册晚于服务状态时，把当前状态补推一次。
     this.service.syncToPage();
+    // 归一化与真实频谱的绑定可能改掉了 vizMode，这里落一次盘把新状态记下来。
+    this.updateNormHint();
+    this.persist();
   }
 
   aboutToDisappear(): void {
@@ -382,6 +415,7 @@ struct Index {
     cfg.scope = this.scope;
     cfg.province = this.province;
     cfg.genre = this.genre;
+    cfg.normalize = this.normEnabled;
     this.store.save();
   }
 
@@ -479,8 +513,11 @@ struct Index {
     this.lastBandSeq = -1;
     this.analysisStartAt = Date.now();
     this.lastSeqAt = Date.now();
+    // 重新起流意味着换了一条流，之前的电平样本作废，重新测。
+    this.normalizer.reset();
     this.analyzer.start(url);
     this.updateVizHint('正在解析音频流…');
+    this.updateNormHint();
   }
 
   private startAnalysis(): void {
@@ -506,18 +543,33 @@ struct Index {
   private recoverAnalysis(reason: string): void {
     if (this.recoverCount >= ANALYSIS_MAX_RECOVER) {
       hilog.warn(0x3202, 'RadioDiag', 'analysis unresponsive, fallback to simulation');
-      this.analyzer.stop();
-      this.painter.setRealMode(false);
-      this.resetRealBands();
-      this.vizMode = 0;
-      this.persist();
-      this.updateVizHint('实时解析无响应，已回退模拟');
+      this.fallbackFromRealAnalysis('实时解析无响应，已回退模拟');
       return;
     }
     this.recoverCount += 1;
     hilog.warn(0x3202, 'RadioDiag', 'analysis recovered (%{public}d): %{public}s', this.recoverCount, reason);
     this.beginAnalysis(this.current.url);
     this.updateVizHint(reason);
+  }
+
+  /**
+   * 真实解析彻底失败时的退路：频谱退回模拟动画。
+   * 音量归一化依赖同一条 PCM 流，没有它就测不出电平，所以一并关掉——
+   * 否则界面上会显示"归一化已开启"，实际却什么都没做。
+   */
+  private fallbackFromRealAnalysis(vizMessage: string): void {
+    this.analyzer.stop();
+    this.painter.setRealMode(false);
+    this.resetRealBands();
+    this.vizMode = 0;
+    if (this.normEnabled) {
+      this.normEnabled = false;
+      this.service.setNormGain(0);
+      this.normGain = 0;
+      this.normHint = '实时解析不可用，音量归一化已暂停';
+    }
+    this.persist();
+    this.updateVizHint(vizMessage);
   }
 
   /**
@@ -544,12 +596,7 @@ struct Index {
     const status: number = this.analyzer.status();
     if (status < 0) {
       const reason: string = this.analyzer.message();
-      this.analyzer.stop();
-      this.painter.setRealMode(false);
-      this.resetRealBands();
-      this.vizMode = 0;
-      this.persist();
-      this.updateVizHint(reason + '，已回退模拟');
+      this.fallbackFromRealAnalysis(reason + '，已回退模拟');
       return;
     }
     const now: number = Date.now();
@@ -566,6 +613,8 @@ struct Index {
         this.painter.setRealBands(this.realBands);
         this.updateVizHint('实时解析中 · 不走麦克风');
       }
+      // 同一帧里也把节目电平交给归一化器：波形和响度来自同一份 PCM，口径一致。
+      this.feedNormLevel();
       return;
     }
     if (status === 1) {
@@ -599,7 +648,98 @@ struct Index {
     }
   }
 
+  // ============================== 音量归一化 ==============================
+
+  /**
+   * 把某台电台的归一化修正增益套到播放器上。
+   * 增益本身存在偏好文件里，这里只是读出来套用。
+   */
+  private applyStationNormGain(stationId: number): void {
+    const g: number = this.store.normGain(stationId);
+    this.normGain = g;
+    this.service.setNormGain(g);
+    this.updateNormHint();
+  }
+
+  /** 归一化状态提示。 */
+  private updateNormHint(): void {
+    if (!this.normEnabled) {
+      this.normHint = '已关闭：所有电台按原始响度播放';
+      return;
+    }
+    if (!this.isPlaying()) {
+      this.normHint = '播放后开始测量本台响度';
+      return;
+    }
+    if (this.normalizer.ready()) {
+      const g: number = this.normGain;
+      const sign: string = g > 0 ? '+' : '';
+      this.normHint = '本台已归一化 ' + sign + g.toFixed(1) + 'dB';
+      return;
+    }
+    const pct: number = Math.round(this.normalizer.progress() * 100);
+    this.normHint = '正在测量本台响度 ' + pct.toString() + '%';
+  }
+
+  /**
+   * 喂一帧节目电平给归一化器。攒够样本后如果测出的修正值与当前生效值差别够大，
+   * 就立刻套用（这样换台后前几秒就能听出差别），并按限流节奏写进偏好文件。
+   */
+  private feedNormLevel(): void {
+    if (!this.normEnabled) {
+      return;
+    }
+    this.normalizer.feed(this.analyzer.levelDb());
+    // 算一次分位数要对上百个样本排序，没必要每帧都算：一秒一次足够，
+    // 也避免增益值在测量过程中来回抖。
+    const now: number = Date.now();
+    if (now - this.lastNormCalcAt >= 1000) {
+      this.lastNormCalcAt = now;
+      const next: number | null = this.normalizer.nextGain(this.normGain);
+      if (next !== null) {
+        this.normGain = next;
+        this.service.setNormGain(next);
+        // 落盘限流：增益变了要立刻生效，但写偏好文件按 15 秒一次，避免频繁 flush。
+        if (now - this.lastNormPersistAt > 15000) {
+          this.lastNormPersistAt = now;
+          this.store.setNormGain(this.current.id, next);
+        }
+      }
+    }
+    // 提示文案自带去重，测量进度变化时才真正触发一次刷新。
+    this.updateNormHint();
+  }
+
+  /**
+   * 归一化开关。它与「真实频谱」是绑定的：
+   * 要测电平必须有 PCM，而 PCM 只在真实解析那条流里，所以开着归一化就只能走真实解析。
+   */
+  private setNormEnabled(on: boolean): void {
+    this.normEnabled = on;
+    if (on) {
+      this.vizMode = 1;
+      this.painter.setRealMode(true);
+      this.normalizer.reset();
+      // 重新打开时把这一台之前测出来的修正值捡回来。
+      this.applyStationNormGain(this.current.id);
+      this.startAnalysis();
+    } else {
+      this.service.setNormGain(0);
+      this.normGain = 0;
+      if (this.vizMode === 0) {
+        this.analyzer.stop();
+      }
+    }
+    this.updateNormHint();
+    this.persist();
+    this.drawFrame();
+  }
+
   private setVizMode(mode: number): void {
+    // 归一化开着时必须走真实解析：没有 PCM 就测不出节目电平。
+    if (this.normEnabled && mode === 0) {
+      return;
+    }
     this.vizMode = mode;
     this.painter.setRealMode(mode === 1);
     if (mode === 1) {
@@ -655,7 +795,8 @@ struct Index {
         domestic++;
       }
     }
-    this.scopeCounts = [all.length, this.favorites.length, domestic, all.length - domestic];
+    this.scopeCounts = [all.length, this.store.recentCount(), this.favorites.length, domestic,
+      all.length - domestic];
   }
 
   private scopeCount(index: number): string {
@@ -712,6 +853,45 @@ struct Index {
     return region + ' · ' + this.current.genre;
   }
 
+  /**
+   * 相对时间：把收听时刻说成「刚刚 / 12 分钟前 / 昨天」这种口语，
+   * 比一串时间戳更像一份「最近播放」清单该有的样子。
+   */
+  private relativeTime(at: number): string {
+    if (at <= 0) {
+      return '';
+    }
+    const diff: number = Date.now() - at;
+    if (diff < 60000) {
+      return '刚刚';
+    }
+    if (diff < 3600000) {
+      return Math.floor(diff / 60000).toString() + ' 分钟前';
+    }
+    if (diff < 86400000) {
+      return Math.floor(diff / 3600000).toString() + ' 小时前';
+    }
+    if (diff < 172800000) {
+      return '昨天';
+    }
+    const d: Date = new Date(at);
+    return (d.getMonth() + 1).toString() + ' 月 ' + d.getDate().toString() + ' 日';
+  }
+
+  /** 某台电台最后一次收听的时刻。 */
+  private recentTimeOf(id: number): number {
+    return this.store.recentAt(id);
+  }
+
+  /** 清空收听历史。 */
+  private clearRecentHistory(): void {
+    this.store.clearRecents();
+    this.computeScopeCounts();
+    if (this.scope === Scope.Recent) {
+      this.applyFilter();
+    }
+  }
+
   /** 宽版 33% 与导航 16% 保持设计稿比例；紧凑三栏按 38%。 */
   /** 导航/页签图标：按名称与选中态选矢量资源，避免用文字符号充当图标。 */
   private navIcon(kind: string, active: boolean): Resource {
@@ -720,6 +900,9 @@ struct Index {
     }
     if (kind === 'heart') {
       return active ? $r('app.media.ic_heart_blue') : $r('app.media.ic_heart_dim');
+    }
+    if (kind === 'history') {
+      return active ? $r('app.media.ic_history_blue') : $r('app.media.ic_history_dim');
     }
     if (kind === 'radio') {
       return active ? $r('app.media.ic_radio_blue') : $r('app.media.ic_radio_dim');
@@ -884,6 +1067,7 @@ struct Index {
 
       Column({ space: 8 }) {
         this.navItem('全部电台', 'grid', Scope.All)
+        this.navItem('最近播放', 'history', Scope.Recent)
         this.navItem('我的收藏', 'heart', Scope.Favorite)
         this.navItem('国内电台', 'radio', Scope.Domestic)
         this.navItem('国际电台', 'globe', Scope.International)
@@ -1064,6 +1248,16 @@ struct Index {
           Text(' 台')
             .fontSize(14)
             .fontColor(Palette.TEXT_DIM)
+          Blank()
+          if (this.scope === Scope.Recent && this.visible.length > 0) {
+            Text('清空记录')
+              .fontSize(14)
+              .fontColor(Palette.TEXT_DIM)
+              .padding({ left: 12, right: 4, top: 6, bottom: 6 })
+              .onClick(() => {
+                this.clearRecentHistory();
+              })
+          }
         }
         .width('100%')
         .height(40)
@@ -1074,21 +1268,23 @@ struct Index {
             Image($r('app.media.ic_radio_border'))
               .width(44)
               .height(44)
-            Text(this.scope === Scope.Favorite ? '还没有收藏的电台' : '没有找到匹配的电台')
+            Text(this.emptyTitle())
               .fontSize(15)
               .fontColor(Palette.TEXT_DIM)
               .margin({ top: 14 })
-            Text('清除筛选')
-              .fontSize(14)
-              .fontColor(Palette.BLUE)
-              .padding({ left: 16, right: 16, top: 8, bottom: 8 })
-              .borderRadius(10)
-              .backgroundColor(Palette.SURFACE_2)
-              .margin({ top: 14 })
-              .onClick(() => {
-                this.resetFilters();
-                this.clearSearch();
-              })
+            if (this.scope !== Scope.Recent) {
+              Text('清除筛选')
+                .fontSize(14)
+                .fontColor(Palette.BLUE)
+                .padding({ left: 16, right: 16, top: 8, bottom: 8 })
+                .borderRadius(10)
+                .backgroundColor(Palette.SURFACE_2)
+                .margin({ top: 14 })
+                .onClick(() => {
+                  this.resetFilters();
+                  this.clearSearch();
+                })
+            }
           }
           .width('100%')
           .layoutWeight(1)
@@ -1097,7 +1293,11 @@ struct Index {
           List({ space: 4 }) {
             ForEach(this.visible.slice(0, this.shownCount), (item: Station, index: number) => {
               ListItem() {
-                this.stationRow(item, index)
+                if (this.scope === Scope.Recent) {
+                  this.recentRow(item, index)
+                } else {
+                  this.stationRow(item, index)
+                }
               }
             }, (item: Station) => item.id.toString())
           }
@@ -1240,6 +1440,17 @@ struct Index {
     })
   }
 
+  /** 列表空态文案：不同范围给的提示不一样。 */
+  private emptyTitle(): string {
+    if (this.scope === Scope.Recent) {
+      return '还没有收听记录';
+    }
+    if (this.scope === Scope.Favorite) {
+      return '还没有收藏的电台';
+    }
+    return '没有找到匹配的电台';
+  }
+
   @Builder
   stationRow(station: Station, index: number) {
     Row() {
@@ -1298,6 +1509,67 @@ struct Index {
     })
   }
 
+  /**
+   * 最近播放的条目行：和普通电台行同构，右侧多一个相对时间。
+   * 时间是这个列表真正的主信息——它回答的是"我刚才在听什么"。
+   */
+  @Builder
+  recentRow(station: Station, index: number) {
+    Row() {
+      Column()
+        .width(3)
+        .height(22)
+        .borderRadius(2)
+        .backgroundColor(Palette.GREEN)
+        .opacity(this.isCurrent(station.id) ? 1 : 0)
+        .margin({ right: 10 })
+      Column() {
+        Text(station.name)
+          .fontSize(15)
+          .fontColor(this.isCurrent(station.id) ? Palette.BLUE : Palette.TEXT)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Row() {
+          Text(station.countryCode === 'CN' ? station.province : station.country)
+            .fontSize(13)
+            .fontColor(Palette.TEXT_DIM)
+          Text(' · ')
+            .fontSize(13)
+            .fontColor(Palette.TEXT_FAINT)
+          Text(station.genre)
+            .fontSize(13)
+            .fontColor(Palette.TEXT_DIM)
+        }
+        .margin({ top: 3 })
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+      .margin({ left: 10 })
+      Text(this.relativeTime(this.recentTimeOf(station.id)))
+        .fontSize(12)
+        .fontColor(Palette.TEXT_FAINT)
+        .maxLines(1)
+        .margin({ left: 8 })
+      Image(this.isFav(station.id) ? $r('app.media.ic_starf_gold') : $r('app.media.ic_star_faint'))
+        .width(44)
+        .height(44)
+        .padding(12)
+        .objectFit(ImageFit.Contain)
+        .margin({ left: 4 })
+        .onClick(() => {
+          this.toggleFav(station);
+        })
+    }
+    .width('100%')
+    .height(60)
+    .padding({ left: 12, right: 12 })
+    .borderRadius(12)
+    .backgroundColor(this.isCurrent(station.id) ? '#182C44' : Palette.SURFACE)
+    .onClick(() => {
+      this.playStation(station);
+    })
+  }
+
   // ============================== 播放器：横竖屏共用组件 ==============================
 
   /** 当前台信息条：台名 / 地区·题材 / 播放态 / LIVE / 收藏，横竖屏常驻字段完全一致。 */
@@ -1338,13 +1610,22 @@ struct Index {
             .maxLines(2)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
             .width('100%')
-          Text(this.stationSubtitle())
-            .fontSize(14)
-            .fontColor(Palette.TEXT_DIM)
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .width('100%')
-            .margin({ top: 8 })
+          Row() {
+            Text(this.stationSubtitle())
+              .fontSize(14)
+              .fontColor(Palette.TEXT_DIM)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            // 归一化修正值：让"这台被补了多少"可见，用户才敢信这个开关。
+            if (this.normEnabled && Math.abs(this.normGain) >= 0.5) {
+              Text(' · 归一化 ' + (this.normGain > 0 ? '+' : '') + this.normGain.toFixed(1) + 'dB')
+                .fontSize(14)
+                .fontColor(Palette.GOLD)
+                .maxLines(1)
+            }
+          }
+          .width('100%')
+          .margin({ top: 8 })
         }
         .layoutWeight(1)
         .alignItems(HorizontalAlign.Start)
@@ -1963,6 +2244,29 @@ struct Index {
           .margin({ bottom: 18 })
 
           Row() {
+            Text('音量归一化')
+              .fontSize(13)
+              .fontColor(Palette.TEXT)
+            Blank()
+            Toggle({ type: ToggleType.Switch, isOn: this.normEnabled })
+              .selectedColor(Palette.BLUE)
+              .onChange((isOn: boolean) => {
+                this.setNormEnabled(isOn);
+              })
+          }
+          .width('100%')
+          .padding(14)
+          .borderRadius(12)
+          .backgroundColor(Palette.SURFACE_2)
+          .margin({ bottom: 6 })
+
+          Text(this.normHint.length > 0 ? this.normHint : '测量各台响度并自动补偿，换台时音量不再忽大忽小')
+            .fontSize(11)
+            .fontColor(Palette.TEXT_FAINT)
+            .width('100%')
+            .margin({ bottom: 18 })
+
+          Row() {
             Text('频谱来源')
               .fontSize(13)
               .fontColor(Palette.TEXT)
@@ -1973,6 +2277,7 @@ struct Index {
               .padding({ left: 14, right: 14, top: 7, bottom: 7 })
               .borderRadius(9)
               .backgroundColor(this.vizMode === 0 ? Palette.BLUE : Palette.SURFACE_2)
+              .opacity(this.normEnabled ? 0.4 : 1)
               .onClick(() => {
                 this.setVizMode(0);
               })
@@ -1995,6 +2300,14 @@ struct Index {
 
           if (this.vizMode === 1) {
             Text(this.vizHint.length > 0 ? this.vizHint : '从电台音频流实时解析，不采集麦克风')
+              .fontSize(11)
+              .fontColor(Palette.TEXT_FAINT)
+              .width('100%')
+              .margin({ bottom: 10 })
+          }
+
+          if (this.normEnabled) {
+            Text('归一化需要真实音频解析，频谱来源已锁定为「真实」')
               .fontSize(11)
               .fontColor(Palette.TEXT_FAINT)
               .width('100%')

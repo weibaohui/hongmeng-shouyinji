@@ -547,6 +547,16 @@ export class RadioService {
     this.player.setUserGain(db);
   }
 
+  /** 某台电台的归一化修正增益（dB）。切台时由页面把新台的值设进来。 */
+  setNormGain(db: number): void {
+    this.player.setNormGain(db);
+  }
+
+  /** 当前生效的归一化修正增益（dB）。 */
+  normGain(): number {
+    return this.player.normGain();
+  }
+
   setUserCurve(curve: number): void {
     this.player.setUserCurve(curve);
   }

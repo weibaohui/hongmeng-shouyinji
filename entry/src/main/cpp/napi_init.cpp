@@ -83,6 +83,19 @@ napi_value Sequence(napi_env env, napi_callback_info info) {
   return result;
 }
 
+/**
+ * level(): 最近一帧的节目电平（dBFS，-120 ~ 0）。
+ * 音量归一化用它判断这一台到底有多响；还没有数据时是 -120。
+ */
+napi_value Level(napi_env env, napi_callback_info info) {
+  (void)env;
+  (void)info;
+  const double value = radio::SpectrumAnalyzer::Get().LevelDb();
+  napi_value result = nullptr;
+  napi_create_double(env, value, &result);
+  return result;
+}
+
 napi_value Init(napi_env env, napi_value exports) {
   napi_property_descriptor desc[] = {
     {"start", nullptr, Start, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -91,6 +104,7 @@ napi_value Init(napi_env env, napi_value exports) {
     {"message", nullptr, Message, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"bands", nullptr, Bands, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"seq", nullptr, Sequence, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"level", nullptr, Level, nullptr, nullptr, nullptr, napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
   return exports;

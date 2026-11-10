@@ -10,15 +10,16 @@ export interface Station {
   countryCode: string;
 }
 
-/** 列表范围：全部 / 收藏 / 国内 / 国际。 */
+/** 列表范围：全部 / 最近播放 / 收藏 / 国内 / 国际。 */
 export enum Scope {
   All = 0,
-  Favorite = 1,
-  Domestic = 2,
-  International = 3
+  Recent = 1,
+  Favorite = 2,
+  Domestic = 3,
+  International = 4
 }
 
-export const SCOPE_NAMES: string[] = ['全部电台', '我的收藏', '国内电台', '国际电台'];
+export const SCOPE_NAMES: string[] = ['全部电台', '最近播放', '我的收藏', '国内电台', '国际电台'];
 
 /**
  * 频谱可视化样式，与 E6 版 index.vue 的 vizStyle 0-8 一一对应。

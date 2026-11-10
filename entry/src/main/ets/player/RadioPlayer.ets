@@ -16,6 +16,15 @@ const TAG: string = 'RadioPlayer';
 const DOMAIN: number = 0x3200;
 
 /**
+ * 系统响度增益的上下界。
+ * 官方文档给出 AVPlayer.setLoudnessGain 的合法区间是 [-90.0, 24.0] dB。
+ * 这里上界取满 24，避免「听感预设 + 用户微调 + 归一化修正」三者在极端组合下
+ * 把自动校准出来的归一化值挤掉；下界取 -24，衰减幅度对广播已经足够。
+ */
+const GAIN_HI: number = 24;
+const GAIN_LO: number = -24;
+
+/**
  * 听感预设：全部由设备端能力实现，不需要云端接口，也不需要自行解码 PCM。
  * - usage 决定系统音效链路（音乐／影院／有声书／游戏），是唯一能改变「音色」的维度；
  * - gainDb 走 AVPlayer.setLoudnessGain，直接决定响度，档位之间刻意拉开 18dB；
@@ -87,8 +96,19 @@ export class RadioPlayer {
   /** 用户在预设之上叠加的响度微调与柔和度；0 表示跟随预设。 */
   private userGainDb: number = 0;
   private userCurve: number = 0;
+  /**
+   * 当前电台的归一化修正增益（dB）。由音量归一化自动测出：
+   * 别的台推流更响就压一点、更轻就补一点，换台时响度不会突变。
+   */
+  private normGainDb: number = 0;
   /** 当前播放器实际设置的 usage，用于判断切换预设是否需要重连。 */
   private appliedUsage: number = -1;
+  /**
+   * 系统响度增益是否真的可用。
+   * setLoudnessGain 是 API 21+ 的接口，个别机型／音频链路并不实现它。
+   * 一旦它不可用，归一化增益必须改走音量缩放，否则这个功能等于没做。
+   */
+  private loudnessOk: boolean = true;
   private fadeTimer: number = -1;
   private fadeResolve: (() => void) | null = null;
   private switchToken: number = 0;
@@ -185,7 +205,39 @@ export class RadioPlayer {
   }
 
   private gainDb(): number {
-    return Math.max(-24, Math.min(12, this.profile().gainDb + this.userGainDb));
+    // 三项叠加：听感预设 + 用户微调 + 该台的归一化修正。
+    // 超出上下界时按「归一化修正 > 用户微调 > 听感预设」的优先级削减，
+    // 保证自动校准出来的归一化值不会被手动微调挤掉。
+    let p: number = this.profile().gainDb;
+    let u: number = this.userGainDb;
+    const n: number = this.normGainDb;
+    let total: number = p + u + n;
+    if (total > GAIN_HI) {
+      // 先削用户微调（可正可负），不够再削听感预设
+      const over: number = total - GAIN_HI;
+      const cut: number = Math.min(Math.abs(u), over);
+      u -= Math.sign(u) * cut;
+      total = p + u + n;
+      if (total > GAIN_HI) {
+        p -= total - GAIN_HI;
+        total = GAIN_HI;
+      }
+    } else if (total < GAIN_LO) {
+      const under: number = GAIN_LO - total;
+      const cut: number = Math.min(Math.abs(u), under);
+      u += Math.sign(u) * cut;
+      total = p + u + n;
+      if (total < GAIN_LO) {
+        p += total - GAIN_LO;
+        total = GAIN_LO;
+      }
+    }
+    return total;
+  }
+
+  /** 当前生效的归一化修正增益（dB），供界面显示。 */
+  normGain(): number {
+    return this.normGainDb;
   }
 
   private curve(): number {
@@ -195,7 +247,14 @@ export class RadioPlayer {
   /** 稳态电平：感知曲线 + 防削峰余量。响度增益由系统侧叠加，不在这里抵消。 */
   private steadyLevel(): number {
     const x: number = Math.max(0, Math.min(1, this.volume / 100));
-    return Math.max(0, Math.min(1, Math.pow(x, this.curve()) * this.profile().trim));
+    let level: number = Math.pow(x, this.curve()) * this.profile().trim;
+    if (!this.loudnessOk && this.normGainDb !== 0) {
+      // 系统响度增益不可用时的兜底：把归一化折算成音量缩放。
+      // 夹在 1.0 以内，避免补响度时削顶。
+      const g: number = Math.pow(10, this.normGainDb / 20);
+      level = Math.min(1.0, level * g);
+    }
+    return Math.max(0, Math.min(1, level));
   }
 
   private fadeInMs(): number {
@@ -272,13 +331,29 @@ export class RadioPlayer {
     try {
       // API 21+ 的响度增益；老设备会 reject，静默降级为纯音量曲线。
       p.setLoudnessGain(db).then((): void => {
+        this.loudnessOk = true;
         hilog.info(DOMAIN, TAG, 'loudness %{public}d dB applied', db);
       }).catch((err: BusinessError): void => {
         hilog.warn(DOMAIN, TAG, 'loudness unsupported: %{public}d', err.code);
+        this.markLoudnessUnavailable();
       });
     } catch (e) {
       hilog.warn(DOMAIN, TAG, 'loudness call failed');
+      this.markLoudnessUnavailable();
     }
+  }
+
+  /**
+   * 系统响度增益不可用时切到音量缩放兜底。
+   * 只改电平不动渲染设置，避免和 applyRendererSettings 互相递归。
+   */
+  private markLoudnessUnavailable(): void {
+    if (!this.loudnessOk) {
+      return;
+    }
+    this.loudnessOk = false;
+    hilog.info(DOMAIN, TAG, 'fall back to volume scaling for normalization');
+    this.fadeTo(this.steadyLevel(), 120);
   }
 
   private applyLiveSettings(): void {
@@ -543,6 +618,19 @@ export class RadioPlayer {
   /** 预设之上的响度微调，-12 ~ +12 dB，真实叠加到系统响度增益。 */
   setUserGain(db: number): void {
     this.userGainDb = Math.max(-12, Math.min(12, Math.round(db)));
+    this.applyLiveSettings();
+  }
+
+  /**
+   * 该台电台的归一化修正增益（dB），与预设、用户微调一起叠加到系统响度增益。
+   * 切台时由上层把新台的修正值设进来；设为 0 表示这一台不需要修正。
+   */
+  setNormGain(db: number): void {
+    const next: number = Math.max(-12, Math.min(12, Math.round(db * 2) / 2));
+    if (next === this.normGainDb) {
+      return;
+    }
+    this.normGainDb = next;
     this.applyLiveSettings();
   }
 

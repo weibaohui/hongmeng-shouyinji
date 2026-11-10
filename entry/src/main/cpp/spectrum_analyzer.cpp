@@ -173,6 +173,33 @@ std::vector<double> SpectrumAnalyzer::Bands() {
   return bands_;
 }
 
+double SpectrumAnalyzer::LevelDb() {
+  return levelDb_.load();
+}
+
+/**
+ * 取走上一拍累积的能量，算出这一拍的均方根电平（dBFS）。
+ * RMS 比峰值稳得多：音乐里一个鼓点就能把峰值拉满，但说话内容的 RMS 变化平缓，
+ * 用它判断「这一台到底有多响」才靠谱。
+ */
+double SpectrumAnalyzer::TakeLevelDb() {
+  double energy = 0.0;
+  long long samples = 0;
+  {
+    std::lock_guard<std::mutex> lock(levelMu_);
+    energy = levelEnergy_;
+    samples = levelSamples_;
+    levelEnergy_ = 0.0;
+    levelSamples_ = 0;
+  }
+  if (samples <= 0) {
+    return -120.0;
+  }
+  const double rms = std::sqrt(energy / static_cast<double>(samples));
+  const double db = 20.0 * std::log10(std::max(rms, 1e-7));
+  return std::max(-120.0, std::min(0.0, db));
+}
+
 long long SpectrumAnalyzer::Sequence() {
   return seq_.load();
 }
@@ -465,34 +492,60 @@ void SpectrumAnalyzer::AppendPcm(const int16_t *data, int sampleCount, int chann
   if (channels <= 0) {
     return;
   }
-  std::lock_guard<std::mutex> lock(pcmMu_);
-  const int frames = sampleCount / channels;
-  for (int i = 0; i < frames; ++i) {
-    int sum = 0;
-    for (int c = 0; c < channels; ++c) {
-      sum += data[i * channels + c];
+  double energy = 0.0;
+  long long frames = 0;
+  {
+    std::lock_guard<std::mutex> lock(pcmMu_);
+    const int count = sampleCount / channels;
+    for (int i = 0; i < count; ++i) {
+      int sum = 0;
+      for (int c = 0; c < channels; ++c) {
+        sum += data[i * channels + c];
+      }
+      const int16_t mono = static_cast<int16_t>(sum / channels);
+      mono_.push_back(mono);
+      // 顺带累计能量供音量归一化使用：这里用的是混完单声道后的样本，和频段口径一致。
+      const double v = static_cast<double>(mono) / 32768.0;
+      energy += v * v;
     }
-    mono_.push_back(static_cast<int16_t>(sum / channels));
+    frames = count;
+    TrimBufferLocked();
   }
-  TrimBufferLocked();
+  {
+    std::lock_guard<std::mutex> lock(levelMu_);
+    levelEnergy_ += energy;
+    levelSamples_ += frames;
+  }
 }
 
 void SpectrumAnalyzer::AppendPcmFloat(const float *data, int sampleCount, int channels) {
   if (channels <= 0) {
     return;
   }
-  std::lock_guard<std::mutex> lock(pcmMu_);
-  const int frames = sampleCount / channels;
-  for (int i = 0; i < frames; ++i) {
-    float sum = 0.0f;
-    for (int c = 0; c < channels; ++c) {
-      sum += data[i * channels + c];
+  double energy = 0.0;
+  long long frames = 0;
+  {
+    std::lock_guard<std::mutex> lock(pcmMu_);
+    const int count = sampleCount / channels;
+    for (int i = 0; i < count; ++i) {
+      float sum = 0.0f;
+      for (int c = 0; c < channels; ++c) {
+        sum += data[i * channels + c];
+      }
+      const float value = sum / static_cast<float>(channels);
+      const float clamped = std::max(-1.0f, std::min(1.0f, value));
+      mono_.push_back(static_cast<int16_t>(clamped * 32767.0f));
+      const double v = static_cast<double>(clamped);
+      energy += v * v;
     }
-    const float value = sum / static_cast<float>(channels);
-    const float clamped = std::max(-1.0f, std::min(1.0f, value));
-    mono_.push_back(static_cast<int16_t>(clamped * 32767.0f));
+    frames = count;
+    TrimBufferLocked();
   }
-  TrimBufferLocked();
+  {
+    std::lock_guard<std::mutex> lock(levelMu_);
+    levelEnergy_ += energy;
+    levelSamples_ += frames;
+  }
 }
 
 /** 对当前缓冲的前 FFT_SIZE 个采样做 Hann 窗 + FFT，压成 16 个对数频段。 */
@@ -536,6 +589,8 @@ void SpectrumAnalyzer::AnalyzeSamples(const int16_t *data, int token) {
     norm = std::max(0.0, std::min(1.0, norm));
     bands[b] = std::sqrt(norm);
   }
+  // 节目电平与频段同一拍算出：音量归一化拿到的就是这个值。
+  levelDb_.store(TakeLevelDb());
   Publish(bands, token);
 }
 
@@ -546,6 +601,12 @@ void SpectrumAnalyzer::RunSession(const std::string &url, int token) {
     std::lock_guard<std::mutex> lock(pcmMu_);
     mono_.clear();
   }
+  {
+    std::lock_guard<std::mutex> lock(levelMu_);
+    levelEnergy_ = 0.0;
+    levelSamples_ = 0;
+  }
+  levelDb_.store(-120.0);
   {
     std::lock_guard<std::mutex> lock(inMu_);
     inQueue_.clear();
