@@ -103,6 +103,15 @@ class SpectrumAnalyzer {
 
   /** 当前会话是否在运行，供解码回调判断是否需要继续累积数据。 */
   std::atomic<bool> sessionActive_{false};
+  /**
+   * pacer 线程是否还该活着。
+   * pacer 的退出条件不能只看 token：会话因报错 / 断流结束时 token 并没有变，
+   * 若只看 token，worker 线程会在 pacer_.join() 上永久阻塞，整条分析链路就此死掉，
+   * 之后无论怎么重连都排不上队，频谱会永远停在旧画面上。
+   */
+  std::atomic<bool> pacerRun_{false};
+  /** 会话开始时刻，用来判断「一直没收到 PCM」的死等。 */
+  std::atomic<int64_t> sessionStartMs_{0};
   std::thread pacer_;
 
   std::mutex stateMu_;

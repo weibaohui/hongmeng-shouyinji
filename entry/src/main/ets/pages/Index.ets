@@ -1,4 +1,5 @@
 import { window } from '@kit.ArkUI';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { AICaptionComponent, AICaptionController, AICaptionOptions } from '@kit.SpeechKit';
@@ -8,10 +9,30 @@ import {
 import { ALL_STATIONS } from '../model/StationData';
 import { RadioStore } from '../model/RadioStore';
 import {
-  RadioPlayer, PlayState, SOUND_NAMES, SOUND_HINTS, SOUND_EFFECTS, FADE_NAMES
+  PlayState, SOUND_NAMES, SOUND_HINTS, SOUND_EFFECTS, FADE_NAMES
 } from '../player/RadioPlayer';
+import { RadioService } from '../player/RadioService';
 import { SpectrumPainter } from '../view/SpectrumPainter';
 import { SpectrumAnalyzer } from '../player/SpectrumAnalyzer';
+
+/** 取异常文本：连取错误信息都可能再抛一次，这里必须绝对安全。 */
+function safeErrorText(e: Object): string {
+  try {
+    const err = e as Error;
+    const name: string = err.name ?? 'Error';
+    const msg: string = err.message ?? '';
+    return name + ': ' + msg;
+  } catch (e2) {
+    return 'unprintable';
+  }
+}
+
+/** 起流阶段最多等这么久（毫秒）：超过说明这次连接没能立起来。 */
+const ANALYSIS_START_TIMEOUT_MS: number = 6000;
+/** 已经跑起来之后，多久没有新频段就算卡死（毫秒）。 */
+const ANALYSIS_STALL_TIMEOUT_MS: number = 2500;
+/** 连续自愈多少次仍拿不到数据，就退回模拟模式，保证画面不会永远定住。 */
+const ANALYSIS_MAX_RECOVER: number = 3;
 
 /** 主页面：平板三栏（导航 / 电台列表 / 播放器），窄屏自动降级为单栏 + 底部页签。 */
 @Entry
@@ -32,6 +53,14 @@ struct Index {
   @State shownCount: number = 50;
   @State favorites: number[] = [];
   @State current: Station = ALL_STATIONS[0];
+  /**
+   * 上一台 / 下一台的预览名。
+   * 这两个值显式存成 @State，而不是在 @Builder 里直接调 neighborName() 现算：
+   * 后台切台（锁屏卡片切台）时，@Builder 的参数是父级渲染那一刻的快照，
+   * ArkUI 的局部更新不会重新求值，标题会变而这两张卡停在旧台名。
+   */
+  @State neighborPrevName: string = '—';
+  @State neighborNextName: string = '—';
   @State playState: PlayState = PlayState.Idle;
   @State statusText: string = '准备就绪';
   @State volume: number = 60;
@@ -68,13 +97,15 @@ struct Index {
       this.statusText = '字幕已就绪';
     },
     onError: (err: BusinessError): void => {
+      hilog.info(0x3202, 'RadioDiag', 'caption error %{public}d', err.code);
       this.captionOn = false;
       this.statusText = '字幕不可用：' + err.code.toString();
     }
   };
 
   private store: RadioStore = RadioStore.getInstance();
-  private player: RadioPlayer = new RadioPlayer();
+  /** 播放服务：播放器归它所有，页面只是订阅者，退到后台不会因为页面销毁而停播。 */
+  private service: RadioService = RadioService.getInstance();
   private painter: SpectrumPainter = new SpectrumPainter();
   /** 真实频谱：原生拉流解码 + FFT，不采集麦克风。 */
   private analyzer: SpectrumAnalyzer = new SpectrumAnalyzer();
@@ -82,19 +113,41 @@ struct Index {
   private canvasCtx: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.renderSettings);
   private canvasWidth: number = 520;
   private canvasHeight: number = 150;
-  private animationTimer: number = -1;
+  /**
+   * 动画循环用的定时器。
+   * 这里刻意不用 setInterval：字幕组件（系统动态组件）被销毁时，ArkUI 会把页面上的
+   * 70ms 定时器连锅端掉，画面就此永远停在最后一帧——实测「开字幕→关字幕」必现。
+   * 改成每帧自己排下一帧的 setTimeout 链，再由 1 秒的心跳看门狗兜底重排，
+   * 动画就不再可能停死。
+   */
+  private animTimer: number = -1;
   private secondTimer: number = -1;
-  private sleepEnd: number = 0;
+  /** 心跳看门狗：负责发现动画循环停摆并把它重新拉起来。 */
+  private watchdogTimer: number = -1;
+  /** 最近一帧成功绘制的时间。 */
+  private lastFrameAt: number = 0;
+  /** 页面是否在前台。退到后台时不再重拉分析流，避免白耗流量与电量。 */
+  private pageVisible: boolean = true;
+  /** 看门狗告警是否已经报过，避免同一次停摆反复刷日志。 */
+  private stallWarned: boolean = false;
   /** 真实频谱的最新数据版本与到达时刻，用来判断画面是不是「断供」了。 */
   private lastBandSeq: number = -1;
   private lastBandAt: number = 0;
   private realBands: number[] = [];
+  /** 最近一次起流的时刻：用来识别「连接一直没立起来」。 */
+  private analysisStartAt: number = 0;
+  /** 最近一次收到新频段的时刻：用来识别「跑到一半卡死」。 */
+  private lastSeqAt: number = 0;
+  /** 连续自愈次数；超过上限仍拿不到数据就退回模拟模式，保证画面不会永远定住。 */
+  private recoverCount: number = 0;
 
   aboutToAppear(): void {
     const ctx: common.UIAbilityContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
     this.store.init(ctx);
     const cfg = this.store.config;
-    this.current = this.store.findById(cfg.lastId);
+    // 页面重建时以服务侧正在播的台为准，避免界面和实际播放对不上。
+    const playing: Station | null = this.service.currentStation();
+    this.current = playing !== null ? playing : this.store.findById(cfg.lastId);
     this.favorites = cfg.favorites.slice();
     this.computeScopeCounts();
     this.volume = cfg.volume;
@@ -107,58 +160,99 @@ struct Index {
     this.systemEffect = cfg.systemEffect;
     this.userGain = cfg.userGain;
     this.userCurve = cfg.userCurve;
-    this.sleepMinutes = 0;
     this.scope = cfg.scope;
     this.province = cfg.province;
     this.genre = cfg.genre;
     this.provinceOptions = this.store.provinces();
     this.genreOptions = this.store.genres();
-    this.player.onState = (state: PlayState, message: string): void => {
+    // 绑定播放服务：建立播控中心会话，并把页面订阅接到服务状态上。
+    this.service.attach(ctx);
+    this.service.onPlayState = (state: PlayState, message: string): void => {
       this.playState = state;
       this.statusText = message;
+      if (state === PlayState.Stopped || state === PlayState.Error) {
+        // 睡眠定时到点、播放出错等收尾场景，频谱的第二条流要一起停掉。
+        this.analyzer.stop();
+      }
     };
-    this.player.setSoundProfile(this.soundPreset);
-    this.player.setFadePreset(this.fadePreset);
-    this.player.setSystemEffect(this.systemEffect);
-    this.player.setUserGain(this.userGain);
-    this.player.setUserCurve(this.userCurve);
-    this.player.setVolume(this.volume);
+    this.service.onStation = (station: Station): void => {
+      // 切台既可能来自页面，也可能来自锁屏卡片，统一在这里收口。
+      this.current = station;
+      this.refreshNeighborNames(station);
+      this.painter.reseedRandom();
+      this.persist();
+      if (this.vizMode === 1 && this.pageVisible) {
+        // 旧台的频段立刻清掉，新流连上之前先按静音画，不要残留上一家的波形
+        this.beginAnalysis(station.url);
+      }
+    };
+    this.service.onSleepTick = (left: number, minutes: number): void => {
+      this.sleepLeft = left;
+      this.sleepMinutes = minutes;
+    };
+    this.service.setCurrent(this.current);
+    this.service.setSoundProfile(this.soundPreset);
+    this.service.setFadePreset(this.fadePreset);
+    this.service.setSystemEffect(this.systemEffect);
+    this.service.setUserGain(this.userGain);
+    this.service.setUserCurve(this.userCurve);
+    this.service.setVolume(this.volume);
+    this.service.setRandom(this.randomMode);
     this.applyFilter(true);
     this.observeWindow();
     this.updateClock();
     this.painter.setTheme(this.colorTheme);
     this.painter.setStyle(this.vizStyle);
     this.painter.setRealMode(this.vizMode === 1);
-    this.animationTimer = setInterval(() => {
-      this.pollAnalysis();
-      this.painter.tick(this.isPlaying());
-      this.drawFrame();
-    }, 70);
+    this.lastFrameAt = Date.now();
+    this.startAnimLoop();
+    // 心跳看门狗：动画循环万一被系统掐掉，这里负责重新拉起来。
+    this.watchdogTimer = setInterval(() => {
+      const idle: number = Date.now() - this.lastFrameAt;
+      if (idle > 1500) {
+        if (!this.stallWarned) {
+          this.stallWarned = true;
+          hilog.warn(0x3202, 'RadioDiag', 'anim loop stalled %{public}d ms, restart', idle);
+        }
+        this.stopAnimLoop();
+        this.startAnimLoop();
+      }
+    }, 1000);
     this.secondTimer = setInterval(() => {
       this.updateClock();
-      this.tickSleep();
     }, 1000);
+    // 页面注册晚于服务状态时，把当前状态补推一次。
+    this.service.syncToPage();
   }
 
   aboutToDisappear(): void {
     this.analyzer.stop();
-    if (this.animationTimer >= 0) {
-      clearInterval(this.animationTimer);
-    }
+    this.stopAnimLoop();
     if (this.secondTimer >= 0) {
       clearInterval(this.secondTimer);
     }
-    this.player.release();
+    if (this.watchdogTimer >= 0) {
+      clearInterval(this.watchdogTimer);
+    }
+    // 播放器归服务所有，这里只解绑回调：页面销毁不能把后台播放一起停掉。
+    this.service.onPlayState = (state: PlayState, message: string): void => {
+    };
+    this.service.onStation = (station: Station): void => {
+    };
+    this.service.onSleepTick = (left: number, minutes: number): void => {
+    };
   }
 
   /** 切到后台就断开分析用的第二条流，避免在后台白耗流量与电量。 */
   onPageHide(): void {
+    this.pageVisible = false;
     this.analyzer.stop();
     this.resetRealBands();
   }
 
   /** 回到前台且还在播放时重新接上，失败会自动回退模拟模式。 */
   onPageShow(): void {
+    this.pageVisible = true;
     if (this.vizMode === 1 && this.isPlaying()) {
       this.startAnalysis();
     }
@@ -211,22 +305,6 @@ struct Index {
     this.clock = (h < 10 ? '0' : '') + h.toString() + ':' + (m < 10 ? '0' : '') + m.toString();
   }
 
-  private tickSleep(): void {
-    if (this.sleepEnd <= 0) {
-      return;
-    }
-    const left: number = Math.max(0, Math.ceil((this.sleepEnd - Date.now()) / 1000));
-    this.sleepLeft = left;
-    if (left <= 0) {
-      this.sleepEnd = 0;
-      this.sleepMinutes = 0;
-      this.player.stop();
-      this.analyzer.stop();
-      this.statusText = '睡眠定时结束';
-      this.persist();
-    }
-  }
-
   private sleepLabel(): string {
     if (this.sleepLeft <= 0) {
       return '定时关闭';
@@ -234,6 +312,41 @@ struct Index {
     const minutes: number = Math.floor(this.sleepLeft / 60);
     const seconds: number = this.sleepLeft % 60;
     return minutes.toString() + ':' + (seconds < 10 ? '0' : '') + seconds.toString() + ' 后关闭';
+  }
+
+  /** 启动动画循环：每帧结束后自己排下一帧。 */
+  private startAnimLoop(): void {
+    if (this.animTimer >= 0) {
+      return;
+    }
+    this.animTimer = setTimeout(() => {
+      this.animTimer = -1;
+      this.animStep();
+      this.startAnimLoop();
+    }, 70);
+  }
+
+  private stopAnimLoop(): void {
+    if (this.animTimer >= 0) {
+      clearTimeout(this.animTimer);
+      this.animTimer = -1;
+    }
+  }
+
+  /** 一帧：拉数据 → 推进动画 → 画到画布。异常必须自己吞掉，否则整条循环会被掐断。 */
+  private animStep(): void {
+    let step: string = 'poll';
+    try {
+      this.pollAnalysis();
+      step = 'tick';
+      this.painter.tick(this.isPlaying());
+      step = 'draw';
+      this.drawFrame();
+      this.lastFrameAt = Date.now();
+      this.stallWarned = false;
+    } catch (e) {
+      hilog.error(0x3202, 'RadioDiag', 'anim error at %{public}s: %{public}s', step, safeErrorText(e));
+    }
   }
 
   private drawFrame(): void {
@@ -244,6 +357,9 @@ struct Index {
   private applyFilter(skipSave: boolean = false): void {
     this.visible = this.store.filter(this.scope, this.keyword, this.province, this.genre);
     this.shownCount = 50;
+    // 锁屏卡片上的上一台 / 下一台走同一份队列，行为和页面里的按钮一致。
+    this.service.setQueue(this.visible.length > 0 ? this.visible : this.store.all);
+    this.refreshNeighborNames(this.current);
     if (!skipSave) {
       this.persist();
     }
@@ -262,7 +378,7 @@ struct Index {
     cfg.systemEffect = this.systemEffect;
     cfg.userGain = this.userGain;
     cfg.userCurve = this.userCurve;
-    cfg.sleepMinutes = 0;
+    cfg.sleepMinutes = this.sleepMinutes;
     cfg.scope = this.scope;
     cfg.province = this.province;
     cfg.genre = this.genre;
@@ -293,47 +409,31 @@ struct Index {
     this.applyFilter();
   }
 
+  /** 页面内点选电台（用户主动操作）：收起筛选、竖屏切到播放页，再交给服务开播。 */
   private playStation(station: Station): void {
-    this.current = station;
     this.filterOpen = false;
     // 竖屏从电台页点选后直接进播放页，不必再手动切页签。
     if (!this.isTablet() && this.activePane === 0) {
       this.activePane = 1;
     }
-    this.persist();
-    // 随机配色换台重掷色相（对齐 E6 playStationObj）
-    this.painter.reseedRandom();
-    this.player.play(station.url);
-    if (this.vizMode === 1) {
-      // 旧台的频段立刻清掉，新流连上之前先按静音画，不要残留上一家的波形
-      this.resetRealBands();
-      this.analyzer.start(station.url);
-      this.updateVizHint('正在解析音频流…');
-    }
+    this.service.playStation(station);
   }
 
+  /** 上一台 / 下一台。服务侧按同一份队列计算，锁屏卡片与页面按钮行为一致。 */
   private cutStation(delta: number): void {
-    const queue: Station[] = this.visible.length > 0 ? this.visible : this.store.all;
-    let at: number = -1;
-    for (let i = 0; i < queue.length; i++) {
-      if (queue[i].id === this.current.id) {
-        at = i;
-        break;
-      }
-    }
-    if (at < 0) {
-      at = 0;
-    }
-    const next: number = this.randomMode
-      ? Math.floor(Math.random() * queue.length)
-      : (at + delta + queue.length) % queue.length;
-    this.playStation(queue[next]);
+    this.service.cutStation(delta);
   }
 
-  private neighborName(delta: number): string {
+  /**
+   * 上一台 / 下一台的台名。
+   * 显式传入当前台，不回读 this.current：ArkUI V1 里 @State 赋值后在同一同步块内
+   * 再读这个属性可能仍拿到旧对象，算出来的名字恰好和原来一样，系统就认为没变化，
+   * 于是标题变了而这两张卡停在旧台名（后台切台时尤其明显）。
+   */
+  private neighborName(cur: Station, delta: number): string {
     const queue: Station[] = this.visible.length > 0 ? this.visible : this.store.all;
     for (let i = 0; i < queue.length; i++) {
-      if (queue[i].id === this.current.id) {
+      if (queue[i].id === cur.id) {
         const at: number = (i + delta + queue.length) % queue.length;
         return queue[at].name;
       }
@@ -341,15 +441,16 @@ struct Index {
     return queue.length > 0 ? queue[0].name : '—';
   }
 
+  /** 重新计算上一台 / 下一台的预览名。当前台或列表变化后都要调一次。 */
+  private refreshNeighborNames(cur: Station): void {
+    this.neighborPrevName = this.neighborName(cur, -1);
+    this.neighborNextName = this.neighborName(cur, 1);
+  }
+
   private togglePlayback(): void {
     const wasPlaying: boolean = this.isPlaying();
-    if (!this.player.toggle()) {
-      this.player.play(this.current.url);
-      if (this.vizMode === 1) {
-        this.startAnalysis();
-      }
-      return;
-    }
+    // 服务在无可恢复实例时会按当前台重新开播，这里只负责频谱的起停。
+    this.service.toggle();
     if (wasPlaying) {
       this.analyzer.stop();
     } else if (this.vizMode === 1) {
@@ -367,6 +468,21 @@ struct Index {
     this.painter.setRealBands([]);
   }
 
+  /**
+   * 对指定流重新起一次分析（切台与自愈共用）。
+   * 一定要先 stop 再 start：SpectrumAnalyzer 对同一个地址会「复用现有会话」，
+   * 不先 stop 的话这里等于什么都没做，卡死的会话永远换不掉。
+   */
+  private beginAnalysis(url: string): void {
+    this.analyzer.stop();
+    this.resetRealBands();
+    this.lastBandSeq = -1;
+    this.analysisStartAt = Date.now();
+    this.lastSeqAt = Date.now();
+    this.analyzer.start(url);
+    this.updateVizHint('正在解析音频流…');
+  }
+
   private startAnalysis(): void {
     if (this.vizMode !== 1) {
       return;
@@ -375,9 +491,33 @@ struct Index {
       this.updateVizHint('播放后开始实时解析');
       return;
     }
-    this.lastBandSeq = -1;
-    this.analyzer.start(this.current.url);
-    this.updateVizHint('正在解析音频流…');
+    this.beginAnalysis(this.current.url);
+  }
+
+  /**
+   * 分析流自愈。
+   *
+   * 原生分析器一旦卡死（常驻线程被死等、或网络读不返回），它报上来的状态既不是失败
+   * 也不是空闲，而是永远停在「正在解析」——ArkTS 侧看着一切正常，画面却再也不会动。
+   * 所以这里不依赖状态码，而是盯住「数据版本号有没有继续涨」：
+   * 涨了就正常，不涨就是卡死，主动重连；反复重连仍拿不到数据就退回模拟模式，
+   * 至少让画面继续动，不至于永远定格。
+   */
+  private recoverAnalysis(reason: string): void {
+    if (this.recoverCount >= ANALYSIS_MAX_RECOVER) {
+      hilog.warn(0x3202, 'RadioDiag', 'analysis unresponsive, fallback to simulation');
+      this.analyzer.stop();
+      this.painter.setRealMode(false);
+      this.resetRealBands();
+      this.vizMode = 0;
+      this.persist();
+      this.updateVizHint('实时解析无响应，已回退模拟');
+      return;
+    }
+    this.recoverCount += 1;
+    hilog.warn(0x3202, 'RadioDiag', 'analysis recovered (%{public}d): %{public}s', this.recoverCount, reason);
+    this.beginAnalysis(this.current.url);
+    this.updateVizHint(reason);
   }
 
   /**
@@ -387,6 +527,11 @@ struct Index {
    */
   private pollAnalysis(): void {
     if (this.vizMode !== 1) {
+      return;
+    }
+    // 退到后台后不再重拉分析流：onPageHide 已经把第二条流断开了，
+    // 这里再拉起来等于白耗流量与电量。
+    if (!this.pageVisible) {
       return;
     }
     if (!this.isPlaying()) {
@@ -407,12 +552,16 @@ struct Index {
       this.updateVizHint(reason + '，已回退模拟');
       return;
     }
+    const now: number = Date.now();
     const seq: number = this.analyzer.seq();
     if (seq !== this.lastBandSeq) {
       this.lastBandSeq = seq;
+      this.lastSeqAt = now;
+      // 数据重新流动，说明上一次自愈成功了，计数归零
+      this.recoverCount = 0;
       const bands: number[] = this.analyzer.bands();
       if (bands.length > 0) {
-        this.lastBandAt = Date.now();
+        this.lastBandAt = now;
         this.realBands = bands.slice();
         this.painter.setRealBands(this.realBands);
         this.updateVizHint('实时解析中 · 不走麦克风');
@@ -420,11 +569,21 @@ struct Index {
       return;
     }
     if (status === 1) {
+      // 正在起流。超过时限还没出帧，说明这次连接根本没立起来（原生侧可能已经卡死）。
+      if (now - this.analysisStartAt > ANALYSIS_START_TIMEOUT_MS) {
+        this.recoverAnalysis('音频流长时间无响应，正在重连…');
+        return;
+      }
       this.updateVizHint('正在解析音频流…');
       return;
     }
+    // 已经在跑却没有新频段：要么在等网络补货，要么分析链路已经卡死。
+    if (now - this.lastSeqAt > ANALYSIS_STALL_TIMEOUT_MS) {
+      this.recoverAnalysis('实时解析中断，正在重连…');
+      return;
+    }
     // 网络流偶尔断供几百毫秒：让柱体缓缓落底，比原地定格自然得多
-    if (this.realBands.length > 0 && Date.now() - this.lastBandAt > 300) {
+    if (this.realBands.length > 0 && now - this.lastBandAt > 300) {
       const decayed: number[] = [];
       for (let i = 0; i < this.realBands.length; i++) {
         decayed.push(this.realBands[i] * 0.92);
@@ -476,20 +635,14 @@ struct Index {
   }
 
   private startSleep(minutes: number): void {
-    this.sleepMinutes = minutes;
-    if (minutes <= 0) {
-      this.sleepEnd = 0;
-      this.sleepLeft = 0;
-    } else {
-      this.sleepEnd = Date.now() + minutes * 60000;
-      this.sleepLeft = minutes * 60;
-    }
+    // 定时器在服务侧计时：退到后台、锁屏都不会漏掉截止时间。
+    this.service.setSleepMinutes(minutes);
     this.persist();
   }
 
   private changeVolume(level: number): void {
     this.volume = Math.max(0, Math.min(100, Math.round(level)));
-    this.player.setVolume(this.volume);
+    this.service.setVolume(this.volume);
     this.persist();
   }
 
@@ -598,7 +751,7 @@ struct Index {
     this.soundPreset = index;
     this.soundNames = SOUND_NAMES.slice();
     this.systemEffect = (index >= 0 && index < SOUND_EFFECTS.length) ? SOUND_EFFECTS[index] : true;
-    this.player.setSoundProfile(index);
+    this.service.setSoundProfile(index);
     this.persist();
   }
 
@@ -621,13 +774,13 @@ struct Index {
   private setFadePreset(index: number): void {
     this.fadePreset = index;
     this.fadeNames = FADE_NAMES.slice();
-    this.player.setFadePreset(index);
+    this.service.setFadePreset(index);
     this.persist();
   }
 
   private setSystemEffect(on: boolean): void {
     this.systemEffect = on;
-    this.player.setSystemEffect(on);
+    this.service.setSystemEffect(on);
     this.persist();
   }
 
@@ -1293,7 +1446,7 @@ struct Index {
         .borderRadius(9)
         .backgroundColor(Palette.RED)
         .onClick(() => {
-          this.player.play(this.current.url);
+          this.service.playStation(this.current);
         })
     }
     .width('100%')
@@ -1376,6 +1529,7 @@ struct Index {
     .margin({ left: 8 })
     .onClick(() => {
       this.randomMode = !this.randomMode;
+      this.service.setRandom(this.randomMode);
       this.persist();
     })
   }
@@ -1425,7 +1579,7 @@ struct Index {
           .blockColor('#FFFFFF')
           .onChange((value: number, mode: SliderChangeMode) => {
             this.volume = Math.round(value);
-            this.player.setVolume(this.volume);
+            this.service.setVolume(this.volume);
             if (mode === SliderChangeMode.End) {
               this.persist();
             }
@@ -1462,7 +1616,7 @@ struct Index {
             .blockColor('#FFFFFF')
             .onChange((value: number, mode: SliderChangeMode) => {
               this.volume = Math.round(value);
-              this.player.setVolume(this.volume);
+              this.service.setVolume(this.volume);
               if (mode === SliderChangeMode.End) {
                 this.persist();
               }
@@ -1493,8 +1647,8 @@ struct Index {
   @Builder
   neighborCards() {
     Row() {
-      this.neighborCard('上一台', '◀', this.neighborName(-1), -1)
-      this.neighborCard('下一台', '▶', this.neighborName(1), 1)
+      this.neighborCard('上一台', '◀', this.neighborPrevName, -1)
+      this.neighborCard('下一台', '▶', this.neighborNextName, 1)
     }
     .width('100%')
     .height(80)
@@ -1721,7 +1875,7 @@ struct Index {
               .blockColor('#FFFFFF')
               .onChange((value: number, mode: SliderChangeMode) => {
                 this.userGain = Math.round(value);
-                this.player.setUserGain(this.userGain);
+                this.service.setUserGain(this.userGain);
                 if (mode === SliderChangeMode.End) {
                   this.persist();
                 }
@@ -1753,7 +1907,7 @@ struct Index {
               .blockColor('#FFFFFF')
               .onChange((value: number, mode: SliderChangeMode) => {
                 this.userCurve = Math.round(value * 10) / 10;
-                this.player.setUserCurve(this.userCurve);
+                this.service.setUserCurve(this.userCurve);
                 if (mode === SliderChangeMode.End) {
                   this.persist();
                 }
@@ -1925,6 +2079,7 @@ struct Index {
               .selectedColor(Palette.BLUE)
               .onChange((isOn: boolean) => {
                 this.randomMode = isOn;
+                this.service.setRandom(isOn);
                 this.persist();
               })
           }

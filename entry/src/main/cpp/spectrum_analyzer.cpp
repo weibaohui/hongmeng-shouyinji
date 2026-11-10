@@ -23,6 +23,8 @@ constexpr const char *kLogTag = "SpectrumAnalyzer";
 constexpr int32_t kPacketCapacity = 256 * 1024;
 /** 连续多久没有新 PCM 就判定流失效（毫秒）。 */
 constexpr int64_t kStallTimeoutMs = 12000;
+/** 起流阶段多久一个 PCM 都没收到就判定这条流废了（毫秒）。 */
+constexpr int64_t kFirstPcmTimeoutMs = 15000;
 /** 出帧节拍：与 UI 的 70ms 定时器同频。 */
 constexpr int64_t kTickMs = 70;
 /** 缓冲硬上限的余量（秒）：目标水位之上再留一点，避免裁剪跟不上。 */
@@ -375,7 +377,7 @@ void SpectrumAnalyzer::PaceLoop(int token) {
   bool everAnalyzed = false;
   int outFrames = 0;
   int64_t statAt = NowMs();
-  while (token_.load() == token) {
+  while (token_.load() == token && pacerRun_.load()) {
     nextTick += kTickMs;
     for (;;) {
       const int64_t waitMs = nextTick - NowMs();
@@ -539,6 +541,7 @@ void SpectrumAnalyzer::AnalyzeSamples(const int16_t *data, int token) {
 
 void SpectrumAnalyzer::RunSession(const std::string &url, int token) {
   sessionActive_.store(true);
+  sessionStartMs_.store(NowMs());
   {
     std::lock_guard<std::mutex> lock(pcmMu_);
     mono_.clear();
@@ -559,6 +562,7 @@ void SpectrumAnalyzer::RunSession(const std::string &url, int token) {
   lastGapLogMs_.store(0);
   gapCount_.store(0);
 
+  pacerRun_.store(true);
   pacer_ = std::thread(&SpectrumAnalyzer::PaceLoop, this, token);
 
   OH_AVSource *source = OH_AVSource_CreateWithURI(const_cast<char *>(url.c_str()));
@@ -734,6 +738,13 @@ void SpectrumAnalyzer::RunSession(const std::string &url, int token) {
         if (Status() < 0) {
           break;
         }
+        // 一次 PCM 都没收到的死等：起流阶段可能卡在握手 / 等首帧上。
+        // 没有这条兜底，状态会永远停在 STARTING，界面上频谱就再也不会动。
+        if (lastDataMs_.load() == 0 && NowMs() - sessionStartMs_.load() > kFirstPcmTimeoutMs) {
+          SPECTRUM_LOGW("no pcm at all for %{public}lld ms", static_cast<long long>(kFirstPcmTimeoutMs));
+          SetSessionStatus(token, STATUS_ENDED, "音频流始终没有数据");
+          break;
+        }
         if (lastDataMs_.load() > 0 && NowMs() - lastDataMs_.load() > kStallTimeoutMs) {
           SPECTRUM_LOGI("stalled: no pcm for %{public}lld ms",
                         static_cast<long long>(kStallTimeoutMs));
@@ -760,6 +771,9 @@ void SpectrumAnalyzer::RunSession(const std::string &url, int token) {
   }
 
   sessionActive_.store(false);
+  // 必须先让 pacer 自己退出再 join：pacer 的退出条件是 token 变化或本会话结束，
+  // 报错 / 断流结束的会话 token 并没有变，不显式收它就会在 join 上死等。
+  pacerRun_.store(false);
   if (pacer_.joinable()) {
     pacer_.join();
   }

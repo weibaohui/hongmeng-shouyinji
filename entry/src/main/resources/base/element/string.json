@@ -11,6 +11,10 @@
     {
       "name": "EntryAbility_label",
       "value": "收音机"
+    },
+    {
+      "name": "reason_background_running",
+      "value": "用于在后台继续播放网络电台，并提供锁屏与控制中心的播控按钮"
     }
   ]
 }

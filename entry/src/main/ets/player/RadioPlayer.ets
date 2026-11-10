@@ -369,55 +369,79 @@ export class RadioPlayer {
     }
   }
 
-  /** 播放/暂停切换：无正在播放的电台时返回 false，由调用方决定开始播放。 */
-  toggle(): boolean {
+  /**
+   * 暂停：先淡出到静音再真正 pause，避免直接切断流时的爆音。
+   * 只有正在播放时才会真正暂停，返回值表示状态是否被改动。
+   */
+  pause(): boolean {
     const p: media.AVPlayer | null = this.player;
     if (p === null) {
       return false;
     }
+    // 已经在淡出暂停的途中，重复调用不叠加
     if (this.pausePending) {
       return true;
     }
-    if (this.avState === 'playing') {
-      const dur: number = this.fadeOutMs();
-      if (dur <= 0) {
-        this.finishFade();
+    if (this.avState !== 'playing') {
+      return false;
+    }
+    const dur: number = this.fadeOutMs();
+    if (dur <= 0) {
+      this.finishFade();
+      try {
+        p.pause();
+      } catch (e) {
+        // ignore
+      }
+      this.rawVolume(0);
+      return true;
+    }
+    this.pausePending = true;
+    const t: number = ++this.toggleToken;
+    this.fadeTo(0, dur).then((): void => {
+      // 淡出期间用户又切了台 / 选了音效，就不要再把新流暂停掉
+      if (t !== this.toggleToken) {
+        return;
+      }
+      this.pausePending = false;
+      if (this.avState === 'playing') {
         try {
           p.pause();
         } catch (e) {
           // ignore
         }
-        this.rawVolume(0);
-        return true;
       }
-      this.pausePending = true;
-      const t: number = ++this.toggleToken;
-      this.fadeTo(0, dur).then((): void => {
-        // 淡出期间用户又切了台 / 选了音效，就不要再把新流暂停掉
-        if (t !== this.toggleToken) {
-          return;
-        }
-        this.pausePending = false;
-        if (this.avState === 'playing') {
-          try {
-            p.pause();
-          } catch (e) {
-            // ignore
-          }
-        }
-        this.rawVolume(0);
-      });
-      return true;
+      this.rawVolume(0);
+    });
+    return true;
+  }
+
+  /** 从暂停恢复播放并淡入。返回是否真的恢复了。 */
+  resume(): boolean {
+    const p: media.AVPlayer | null = this.player;
+    if (p === null) {
+      return false;
+    }
+    if (this.pausePending || this.avState !== 'paused') {
+      return false;
+    }
+    this.rawVolume(0);
+    try {
+      p.play();
+    } catch (e) {
+      return false;
+    }
+    this.fadeTo(this.steadyLevel(), this.fadeInMs());
+    return true;
+  }
+
+  /** 播放/暂停切换：无正在播放的电台时返回 false，由调用方决定开始播放。 */
+  toggle(): boolean {
+    if (this.avState === 'playing') {
+      return this.pause();
     }
     if (this.avState === 'paused') {
-      this.rawVolume(0);
-      try {
-        p.play();
-      } catch (e) {
-        return false;
-      }
-      this.fadeTo(this.steadyLevel(), this.fadeInMs());
-      return true;
+      return this.resume();
     }
     return false;
   }

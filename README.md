@@ -16,6 +16,7 @@
 | 筛选  | 范围（全部／收藏／国内／国际）+ 省市胶囊 + 题材胶囊，多维叠加，选中态实时高亮                           |
 | 收藏  | 收藏夹、任意列表内一键收藏，持久化保存                                                 |
 | 播放  | 系统 `AVPlayer` 直连网络流；播放／暂停／停止、音量调节、上一台／下一台、顺序／随机切台                   |
+| 后台播放 | 接入系统播控中心（AVSession）并申请 `AUDIO_PLAYBACK` 长时任务：退到后台／锁屏后继续出声，锁屏与控制中心有播控卡片（播放／暂停／上一台／下一台／停止），支持耳机按键与点击通知回到应用；睡眠定时改由服务侧计时，后台也能按时停 |
 | 平滑切台 | 切台先淡出旧台再换流、新台从 0 电平淡入；暂停／恢复／停止／拖动音量同样平滑过渡，消除流切换的电平跳变爆音；渐变时长可选关闭／短／标准／舒缓 |
 | 音效  | 12 档端侧听感预设（原声／纯音／新闻／人声／音乐／醇厚／影院／环绕／游戏／收音机／夜间／轻语），组合 `audioRendererInfo.usage` 系统音效链路（音乐／影院／有声书／游戏）、`setLoudnessGain` 响度增益（−12 ~ +6 dB）、感知音量曲线、削峰余量与渐入时长；另提供响度微调（−12 ~ +12 dB）、柔和度、系统音效引擎开关，全部无需云端或自行解码 PCM |
 | 容错  | 播放失败时在 `http` / `https` 备用线路间自动重试一次；明文流由网络安全配置放行                    |
@@ -32,6 +33,7 @@
 - **设备**：`tablet` / `phone`，HarmonyOS 6.1.0 及以上，已开启开发者模式与 USB 调试  
   （已在 HUAWEI MatePad Mini 悦读版 MLR-AL00 / API 24 上真机验证）
 - **网络**：应用声明 `ohos.permission.INTERNET`；播放需要可访问电台流地址的网络
+- **后台**：应用声明 `ohos.permission.KEEP_BACKGROUND_RUNNING` 并在 `EntryAbility` 上配置 `backgroundModes: ["audioPlayback"]`，用于后台播放的长时任务
 - **工具脚本**：Python 3（数据导出／图标生成）、Bash（无线调试脚本）；DevEco 自带 Node 用于命令行构建
 
 ## 快速开始
@@ -71,6 +73,7 @@ entry/src/main/
     StationData.ets           静态电台数据汇总入口
     data/StationDataPart*.ets 自动生成的电台分片（请勿手工编辑）
   ets/player/RadioPlayer.ets  AVPlayer 封装、状态机、音量渐变引擎、端侧音效预设、备用线路重试
+  ets/player/RadioService.ets 播放服务单例：持有播放器、播控中心会话（AVSession）、长时任务、睡眠定时
   ets/view/SpectrumPainter.ets Canvas 频谱绘制
   resources/                  颜色、字符串、图标、页面路由、网络安全配置
 preview/                     可交互 HTML 原型 + 各尺寸／真机截图
@@ -101,6 +104,28 @@ tools/
 
 > **安全提醒**：8710 端口在局域网内无认证，同一 Wi-Fi 下的其他设备也能连接。调试结束请执行 `disable` 关闭。设备重启后若端口未自动恢复，插一次线重新执行 `enable` 即可。
 
+## 验证后台播放
+
+```bash
+./tools/wireless.sh push --build     # 编译 + 安装 + 启动
+./tools/wireless.sh logf RadioService # 另开一个终端跟随日志
+```
+
+1. 在应用里点开任意电台，等状态变成「正在播放」；
+2. 按 Home 键退到后台 —— 声音应当继续；
+3. 锁屏 / 下拉控制中心，应当出现媒体卡片，显示台名与地区，可播放／暂停／上一台／下一台；
+4. 在卡片上按「下一台」，回到应用后应看到列表与频率都已切到新台。
+
+日志里应当依次出现：
+
+| 日志关键字 | 含义 |
+| --- | --- |
+| `av session ready` | 播控中心会话建立成功 |
+| `continuous task acquired` | 后台长时任务申请成功（进程不会被挂起） |
+| `continuous task released` | 停止播放时长时任务已释放 |
+
+若 `continuous task acquired` 没出现，多半是 `ohos.permission.KEEP_BACKGROUND_RUNNING` 没授上；用 `./tools/wireless.sh shell "bm dump -n com.example.helloworld"` 可以确认权限状态。
+
 ## 数据与工具
 
 电台数据来自参考项目 `youdao-tinglibao-e6/framework/examples/radio/assets/radio.db`（蜻蜓 FM / Radio Browser 等公开流）。重新导出：
@@ -118,7 +143,29 @@ HTML 预览直接用浏览器打开 `preview/index.html`（`?pane=1` 打开竖�
 ## 已知限制
 
 - 当前 `bundleName` 为 `com.example.helloworld`，是复用本机调试证书时的临时包名（调试 profile 绑定包名）。正式发布前需改为自有包名并在 DevEco 重新自动签名。
-- 仅支持前台播放，未接入 `AVSession`／后台播放／锁屏控制；睡眠定时基于前台页面计时，应用退到后台不保证按时停止。
+- **后台播放**：已接入播控中心（`AVSession`）并申请 `AUDIO_PLAYBACK` 长时任务，按 Home 键或锁屏后声音会继续，锁屏／控制中心有播控卡片。几点边界：
+  - 卡片封面用应用自己的图标（`app_icon.png` 512×512）；电台数据里没有图片字段，所以不按台区分。
+  - 直播流没有时长，`AVPlaybackState` 不填 `position` / `duration`，系统按「直播」显示而不是进度条。
+  - 字幕浮层长在页面里，退到后台后不再显示（不影响出声）。
+  - 从最近任务里划掉应用仍会结束播放（与系统媒体应用一致）。
+- 睡眠定时由播放服务计时，退到后台后依然会按时停止。
+- **接 AVSession 踩到的两个坑**（都在真机 API 24 上验证过，已写进 `RadioService.ets` 注释）：
+  1. 队列项的 `description` 里**不能带 `mediaImage`**。一张 512×512 的 PixelMap 约 1MB，乘上条目数直接超出 Parcel 上限，系统一律回 `SetAVQueueItems failed : item number is out of range`。封面只能放在顶层 `AVMetadata` 上。
+  2. **`AVQueueItem.itemId` 必须是队列内序号 `[1, N]`**，不能直接用业务 id。系统按序号定位条目，所以这里重新编号，再用一张 `itemId → 电台` 的映射表把 `skipToQueueItem` 回调还原回来。
+  - `setMediaCenterControlType`（显式声明控制中心要显示哪些按钮）是 API 26 才有的接口，本工程 `compatibleSdkVersion` 为 24 用不了，因此改用「给系统一份队列」这条兼容路径 —— 卡片上的上一台／下一台就是靠它出现的。
+- **字幕开→关后频谱定格**（已修复，真机 API 24 上复现并验证）：
+  - 现象：点「字幕」开启、再关闭，频谱动画立刻停住并永远停在最后一帧；音频照常播放，页面上其它交互也照常响应。
+  - 定位过程：页面的 70ms `setInterval` 在**系统动态组件（`AICaptionComponent`）被销毁**的那一刻被单独取消 —— 独立的 1 秒心跳定时器仍在走、`aboutToDisappear` 没有被调用（说明页面没被销毁），回调里也没有任何异常抛出。换句话说不是「画错了」，是「压根不再画了」。
+  - 修法（`entry/src/main/ets/pages/Index.ets`）：
+    1. 动画循环改成「每帧自己排下一帧」的 `setTimeout` 链，不再用 `setInterval`；
+    2. 回调内部自己 `try/catch` —— 定时器回调里抛异常同样会让 ArkUI 取消这个定时器；
+    3. 加 1 秒心跳看门狗：超过 1.5 秒没有成功画出一帧就判定循环被掐掉，重新拉起来（双重保险）。
+  - 顺带修掉原生分析器的两个死等（`entry/src/main/cpp/spectrum_analyzer.cpp`）：
+    1. `PaceLoop` 原本只在 token 变化时退出，而会话因报错／断流结束时 token 并不变，worker 线程会卡死在 `pacer_.join()` 上，整条分析链路从此死掉、之后任何重连都排不上队；现在会话结束会显式收掉 pacer。
+    2. 起流阶段「一个 PCM 都没收到」原本没有超时，流起不来时状态会永远停在 `STARTING`；现在 15 秒拿不到数据即判失败。
+  - ArkTS 侧再加一层自愈（`pollAnalysis`）：不看状态码，只盯频段数据版本号有没有继续涨 —— 不涨就重连分析流，连续重连仍无数据才回退模拟模式，保证画面永远不至于定格。
+  - 顺带理顺后台行为：`onPageHide` 断开第二条分析流后不再被后台的定时器悄悄拉回来（`pageVisible` 标记），回到前台由 `onPageShow` 统一重连；锁屏卡片切台也不会在后台偷偷开新流。
+  - 验证方式：真机上按「开字幕 → 关字幕 → 连续采样 5 次频谱画布的像素差」，修复前恒为 0（完全静止），修复后 5/5 都在动；重复开关、切台、Home 退后台再回前台同样 5/5 在动。
 - 电台流地址来自第三方公开数据，可能失效或变更，本项目不保证其可用性；部分流为 HTTP 明文，已在 `network_config.json` 放行。
 - 电台数据及流地址的版权归原作者与各电台所有，公开使用前请自行确认使用许可。
 - **字幕只显示、不保存**：`AICaptionComponent` 不向应用回传识别文本（`AICaptionOptions` 只有 `onPrepared` / `onError`）。实测第三方应用无法内录本应用音频（`SOURCE_TYPE_PLAYBACK_CAPTURE` 返回 `6800301`，`CAPTURE_VOICE_DOWNLINK_AUDIO` 为 `system_basic` 权限），麦克风只能采集外放环境音，`READ_PASTEBOARD` 同样是系统级权限，因此未实现字幕落盘。若要全自动保存，需改为自解码播放链路（PCM → `speechRecognizer.writeAudio`）或对字幕区域做端侧 OCR。
